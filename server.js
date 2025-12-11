@@ -237,15 +237,15 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'Stripe API server is running' });
 });
 
-// Debug endpoint to check payments in database
-app.get('/api/debug/payments/:contractorId', async (req, res) => {
+// Get contractor payments (bypasses RLS using admin client)
+app.get('/api/payments/contractor/:contractorId', async (req, res) => {
   if (!supabaseAdmin) {
     return res.status(503).json({ error: 'Supabase not configured' });
   }
   
   try {
     const { contractorId } = req.params;
-    console.log('🔍 Debug: Fetching payments for contractor:', contractorId);
+    console.log('💰 Backend: Fetching payments for contractor:', contractorId);
     
     const { data: payments, error } = await supabaseAdmin
       .from('payments')
@@ -254,15 +254,12 @@ app.get('/api/debug/payments/:contractorId', async (req, res) => {
       .order('created_at', { ascending: false });
     
     if (error) {
-      console.error('❌ Debug: Error fetching payments:', error);
+      console.error('❌ Backend: Error fetching contractor payments:', error);
       return res.status(500).json({ error: error.message });
     }
     
-    console.log('✅ Debug: Found payments:', payments?.length || 0);
-    res.json({
-      count: payments?.length || 0,
-      payments: payments || []
-    });
+    console.log('✅ Backend: Found contractor payments:', payments?.length || 0);
+    res.json(payments || []);
   } catch (error) {
     console.error('❌ Debug: Unexpected error:', error);
     res.status(500).json({ error: error.message });
