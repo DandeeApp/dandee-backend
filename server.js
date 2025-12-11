@@ -237,6 +237,57 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'Stripe API server is running' });
 });
 
+// Create review (bypasses RLS using admin client)
+app.post('/api/reviews/create', async (req, res) => {
+  if (!supabaseAdmin) {
+    return res.status(503).json({ error: 'Supabase not configured' });
+  }
+  
+  try {
+    const { reviewData } = req.body || {};
+    
+    if (!reviewData) {
+      return res.status(400).json({ error: 'Review data is required' });
+    }
+    
+    console.log('⭐ Backend: Creating review:', reviewData);
+    
+    const reviewToInsert = {
+      job_request_id: reviewData.job_request_id,
+      invoice_id: reviewData.invoice_id || null,
+      payment_id: reviewData.payment_id || null,
+      contractor_id: reviewData.contractor_id,
+      customer_id: reviewData.customer_id,
+      rating: reviewData.rating,
+      review_text: reviewData.review_text || null,
+      quality_rating: reviewData.quality_rating || null,
+      communication_rating: reviewData.communication_rating || null,
+      timeliness_rating: reviewData.timeliness_rating || null,
+      professionalism_rating: reviewData.professionalism_rating || null,
+      photo_urls: reviewData.photo_urls || [],
+      status: 'published',
+      is_verified: true,
+    };
+    
+    const { data, error } = await supabaseAdmin
+      .from('reviews')
+      .insert(reviewToInsert)
+      .select()
+      .single();
+    
+    if (error) {
+      console.error('❌ Backend: Failed to create review:', error);
+      return res.status(500).json({ error: 'Failed to create review', details: error.message });
+    }
+    
+    console.log('✅ Backend: Review created:', data.id);
+    res.json({ success: true, review: data });
+  } catch (error) {
+    console.error('❌ Backend: Unexpected error creating review:', error);
+    res.status(500).json({ error: 'Unexpected error creating review', details: error.message });
+  }
+});
+
 // Get contractor reviews (bypasses RLS)
 app.get('/api/reviews/contractor/:contractorId', async (req, res) => {
   if (!supabaseAdmin) {
