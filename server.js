@@ -237,6 +237,35 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'Stripe API server is running' });
 });
 
+// Get contractor reviews (bypasses RLS)
+app.get('/api/reviews/contractor/:contractorId', async (req, res) => {
+  if (!supabaseAdmin) {
+    return res.status(503).json({ error: 'Supabase not configured' });
+  }
+  
+  try {
+    const { contractorId } = req.params;
+    console.log('⭐ Backend: Fetching reviews for contractor:', contractorId);
+    
+    const { data: reviews, error } = await supabaseAdmin
+      .from('reviews')
+      .select('*')
+      .eq('contractor_id', contractorId)
+      .order('created_at', { ascending: false });
+    
+    if (error) {
+      console.error('❌ Backend: Error fetching reviews:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    
+    console.log('✅ Backend: Found reviews:', reviews?.length || 0);
+    res.json(reviews || []);
+  } catch (error) {
+    console.error('❌ Backend: Unexpected error fetching reviews:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Get contractor payments (bypasses RLS using admin client)
 app.get('/api/payments/contractor/:contractorId', async (req, res) => {
   if (!supabaseAdmin) {
