@@ -237,6 +237,38 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'Stripe API server is running' });
 });
 
+// Debug endpoint to check payments in database
+app.get('/api/debug/payments/:contractorId', async (req, res) => {
+  if (!supabaseAdmin) {
+    return res.status(503).json({ error: 'Supabase not configured' });
+  }
+  
+  try {
+    const { contractorId } = req.params;
+    console.log('🔍 Debug: Fetching payments for contractor:', contractorId);
+    
+    const { data: payments, error } = await supabaseAdmin
+      .from('payments')
+      .select('*')
+      .eq('contractor_id', contractorId)
+      .order('created_at', { ascending: false });
+    
+    if (error) {
+      console.error('❌ Debug: Error fetching payments:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    
+    console.log('✅ Debug: Found payments:', payments?.length || 0);
+    res.json({
+      count: payments?.length || 0,
+      payments: payments || []
+    });
+  } catch (error) {
+    console.error('❌ Debug: Unexpected error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Create Payment Intent
 app.post('/api/create-payment-intent', async (req, res) => {
   try {
