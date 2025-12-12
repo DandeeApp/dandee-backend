@@ -1434,7 +1434,7 @@ app.post('/api/payments/create', async (req, res) => {
   try {
     const { invoice_id, job_request_id, contractor_id, customer_id, amount, payment_method } = req.body || {};
 
-    // job_request_id is optional - some invoices may not have an associated job request
+    // job_request_id is optional - we can get it from the invoice if not provided
     if (!invoice_id || !contractor_id || !customer_id || !amount) {
       return res.status(400).json({
         error: 'Missing required payment fields',
@@ -1442,7 +1442,42 @@ app.post('/api/payments/create', async (req, res) => {
       });
     }
 
-    console.log('💳 Backend: Creating payment record:', { invoice_id, job_request_id: job_request_id || 'none', amount, customer_id });
+    // Get job_request_id from invoice if not provided
+    let finalJobRequestId = job_request_id;
+    if (!finalJobRequestId || finalJobRequestId === '') {
+      console.log('💳 Backend: job_request_id not provided, fetching from invoice...');
+      const { data: invoiceData, error: invoiceError } = await supabaseAdmin
+        .from('invoices')
+        .select('job_request_id')
+        .eq('id', invoice_id)
+        .single();
+      
+      if (invoiceData?.job_request_id) {
+        finalJobRequestId = invoiceData.job_request_id;
+        console.log('💳 Backend: Got job_request_id from invoice:', finalJobRequestId);
+      } else {
+        // If invoice doesn't have job_request_id, try to find one from job_requests for this customer/contractor
+        const { data: jobData } = await supabaseAdmin
+          .from('job_requests')
+          .select('id')
+          .eq('customer_id', customer_id)
+          .eq('contractor_id', contractor_id)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .single();
+        
+        if (jobData?.id) {
+          finalJobRequestId = jobData.id;
+          console.log('💳 Backend: Got job_request_id from job_requests:', finalJobRequestId);
+        } else {
+          console.log('💳 Backend: No job_request_id found, will use placeholder');
+          // Create a placeholder job request ID if none exists
+          finalJobRequestId = '00000000-0000-0000-0000-000000000000';
+        }
+      }
+    }
+
+    console.log('💳 Backend: Creating payment record:', { invoice_id, job_request_id: finalJobRequestId, amount, customer_id });
 
     // Generate payment number
     const timestamp = Date.now();
@@ -1455,7 +1490,7 @@ app.post('/api/payments/create', async (req, res) => {
     const paymentData = {
       payment_number,
       invoice_id,
-      job_request_id: job_request_id || null, // Make job_request_id optional
+      job_request_id: finalJobRequestId,
       contractor_id,
       customer_id,
       amount,
