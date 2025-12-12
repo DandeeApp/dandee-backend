@@ -1456,12 +1456,12 @@ app.post('/api/payments/create', async (req, res) => {
         finalJobRequestId = invoiceData.job_request_id;
         console.log('💳 Backend: Got job_request_id from invoice:', finalJobRequestId);
       } else {
-        // If invoice doesn't have job_request_id, try to find one from job_requests for this customer/contractor
-        const { data: jobData } = await supabaseAdmin
+        // If invoice doesn't have job_request_id, try to find one from job_requests for this customer
+        // First try with contractor_id
+        let { data: jobData } = await supabaseAdmin
           .from('job_requests')
           .select('id')
           .eq('customer_id', customer_id)
-          .eq('contractor_id', contractor_id)
           .order('created_at', { ascending: false })
           .limit(1)
           .single();
@@ -1469,10 +1469,20 @@ app.post('/api/payments/create', async (req, res) => {
         if (jobData?.id) {
           finalJobRequestId = jobData.id;
           console.log('💳 Backend: Got job_request_id from job_requests:', finalJobRequestId);
+          
+          // Also update the invoice with the job_request_id for future reference
+          await supabaseAdmin
+            .from('invoices')
+            .update({ job_request_id: finalJobRequestId })
+            .eq('id', invoice_id);
+          console.log('💳 Backend: Updated invoice with job_request_id');
         } else {
-          console.log('💳 Backend: No job_request_id found, will use placeholder');
-          // Create a placeholder job request ID if none exists
-          finalJobRequestId = '00000000-0000-0000-0000-000000000000';
+          // No job request found - this is an error state
+          console.error('💳 Backend: No job_request_id found for customer:', customer_id);
+          return res.status(400).json({
+            error: 'No job request found for this invoice',
+            details: 'Please ensure this invoice is associated with a job request'
+          });
         }
       }
     }
