@@ -252,8 +252,59 @@ app.post('/api/reviews/create', async (req, res) => {
     
     console.log('⭐ Backend: Creating review:', reviewData);
     
+    // Handle empty string job_request_id - convert to null for UUID fields
+    let jobRequestId = reviewData.job_request_id;
+    if (!jobRequestId || jobRequestId === '') {
+      // Try to get job_request_id from the invoice if available
+      if (reviewData.invoice_id) {
+        console.log('⭐ Backend: job_request_id empty, fetching from invoice:', reviewData.invoice_id);
+        const { data: invoiceData } = await supabaseAdmin
+          .from('invoices')
+          .select('job_request_id')
+          .eq('id', reviewData.invoice_id)
+          .single();
+        
+        if (invoiceData?.job_request_id) {
+          jobRequestId = invoiceData.job_request_id;
+          console.log('⭐ Backend: Found job_request_id from invoice:', jobRequestId);
+        }
+      }
+      
+      // If still no job_request_id, try to find one from the payment
+      if (!jobRequestId && reviewData.payment_id) {
+        console.log('⭐ Backend: job_request_id still empty, fetching from payment:', reviewData.payment_id);
+        const { data: paymentData } = await supabaseAdmin
+          .from('payments')
+          .select('job_request_id')
+          .eq('id', reviewData.payment_id)
+          .single();
+        
+        if (paymentData?.job_request_id) {
+          jobRequestId = paymentData.job_request_id;
+          console.log('⭐ Backend: Found job_request_id from payment:', jobRequestId);
+        }
+      }
+      
+      // If still no job_request_id, try to find a recent one for the customer/contractor
+      if (!jobRequestId && reviewData.customer_id) {
+        console.log('⭐ Backend: job_request_id still empty, searching for recent job request');
+        const { data: recentJob } = await supabaseAdmin
+          .from('job_requests')
+          .select('id')
+          .eq('customer_id', reviewData.customer_id)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .single();
+        
+        if (recentJob?.id) {
+          jobRequestId = recentJob.id;
+          console.log('⭐ Backend: Found recent job_request_id:', jobRequestId);
+        }
+      }
+    }
+    
     const reviewToInsert = {
-      job_request_id: reviewData.job_request_id,
+      job_request_id: jobRequestId || null,
       invoice_id: reviewData.invoice_id || null,
       payment_id: reviewData.payment_id || null,
       contractor_id: reviewData.contractor_id,
