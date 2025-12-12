@@ -1534,6 +1534,26 @@ app.post('/api/payments/update-status', async (req, res) => {
       });
     }
 
+    // If payment succeeded, also update the invoice status to 'paid'
+    if (status === 'succeeded' && data.invoice_id) {
+      console.log('💳 Backend: Updating invoice status to paid:', data.invoice_id);
+      const { error: invoiceError } = await supabaseAdmin
+        .from('invoices')
+        .update({ 
+          status: 'paid', 
+          paid_date: new Date().toISOString(),
+          amount_paid: data.amount 
+        })
+        .eq('id', data.invoice_id);
+
+      if (invoiceError) {
+        console.error('⚠️ Failed to update invoice status:', invoiceError);
+        // Don't fail the whole request, payment was successful
+      } else {
+        console.log('✅ Invoice status updated to paid');
+      }
+    }
+
     console.log('✅ Payment status updated:', data.id);
     res.json({
       success: true,
@@ -1543,6 +1563,62 @@ app.post('/api/payments/update-status', async (req, res) => {
     console.error('❌ Unexpected error updating payment:', error);
     res.status(500).json({
       error: 'Unexpected error updating payment',
+      details: error.message,
+    });
+  }
+});
+
+// Update invoice status (bypasses RLS)
+app.post('/api/invoices/update-status', async (req, res) => {
+  if (!supabaseAdmin) {
+    return res.status(503).json({
+      error: 'Supabase admin client not configured',
+    });
+  }
+
+  try {
+    const { invoiceId, status, amount_paid } = req.body || {};
+
+    if (!invoiceId || !status) {
+      return res.status(400).json({
+        error: 'invoiceId and status are required',
+      });
+    }
+
+    console.log('📄 Backend: Updating invoice status:', { invoiceId, status });
+
+    const updateData = { status };
+    if (status === 'paid') {
+      updateData.paid_date = new Date().toISOString();
+    }
+    if (amount_paid !== undefined) {
+      updateData.amount_paid = amount_paid;
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('invoices')
+      .update(updateData)
+      .eq('id', invoiceId)
+      .select()
+      .single();
+
+    if (error) {
+      console.error('❌ Failed to update invoice:', error);
+      return res.status(500).json({
+        error: 'Failed to update invoice status',
+        details: error.message,
+      });
+    }
+
+    console.log('✅ Invoice status updated:', data.id);
+    res.json({
+      success: true,
+      invoice: data,
+    });
+  } catch (error) {
+    console.error('❌ Unexpected error updating invoice:', error);
+    res.status(500).json({
+      error: 'Unexpected error updating invoice',
       details: error.message,
     });
   }
