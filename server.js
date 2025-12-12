@@ -1434,13 +1434,15 @@ app.post('/api/payments/create', async (req, res) => {
   try {
     const { invoice_id, job_request_id, contractor_id, customer_id, amount, payment_method } = req.body || {};
 
-    if (!invoice_id || !job_request_id || !contractor_id || !customer_id || !amount) {
+    // job_request_id is optional - some invoices may not have an associated job request
+    if (!invoice_id || !contractor_id || !customer_id || !amount) {
       return res.status(400).json({
         error: 'Missing required payment fields',
+        details: { invoice_id: !!invoice_id, contractor_id: !!contractor_id, customer_id: !!customer_id, amount: !!amount }
       });
     }
 
-    console.log('💳 Backend: Creating payment record:', { invoice_id, amount, customer_id });
+    console.log('💳 Backend: Creating payment record:', { invoice_id, job_request_id: job_request_id || 'none', amount, customer_id });
 
     // Generate payment number
     const timestamp = Date.now();
@@ -1453,7 +1455,7 @@ app.post('/api/payments/create', async (req, res) => {
     const paymentData = {
       payment_number,
       invoice_id,
-      job_request_id,
+      job_request_id: job_request_id || null, // Make job_request_id optional
       contractor_id,
       customer_id,
       amount,
