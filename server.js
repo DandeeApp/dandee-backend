@@ -1722,6 +1722,139 @@ app.post('/api/invoices/update-status', async (req, res) => {
   }
 });
 
+// Delete user account (requires admin privileges)
+app.post('/api/account/delete', async (req, res) => {
+  if (!supabaseAdmin) {
+    return res.status(503).json({
+      error: 'Supabase admin client not configured',
+      details: 'Check SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables.',
+    });
+  }
+
+  try {
+    const { userId, userType } = req.body || {};
+
+    if (!userId) {
+      return res.status(400).json({
+        error: 'userId is required',
+      });
+    }
+
+    console.log('🗑️ Backend: Deleting account for user:', userId, 'type:', userType);
+
+    // Step 1: Delete profile data based on user type
+    const profileTable = userType === 'contractor' ? 'contractor_profiles' : 'customer_profiles';
+    
+    console.log(`🗑️ Backend: Deleting ${profileTable} for user:`, userId);
+    const { error: profileError } = await supabaseAdmin
+      .from(profileTable)
+      .delete()
+      .eq('user_id', userId);
+
+    if (profileError) {
+      console.error('⚠️ Backend: Failed to delete profile (continuing):', profileError);
+      // Continue anyway - profile might not exist
+    } else {
+      console.log('✅ Backend: Profile deleted');
+    }
+
+    // Step 2: Delete related data (job requests, quotes, etc.)
+    // For customers: delete their job requests
+    if (userType === 'customer') {
+      console.log('🗑️ Backend: Cleaning up customer data...');
+      
+      // Delete job requests created by this customer
+      const { error: jobsError } = await supabaseAdmin
+        .from('job_requests')
+        .delete()
+        .eq('customer_id', userId);
+      
+      if (jobsError) {
+        console.error('⚠️ Backend: Failed to delete job requests:', jobsError);
+      }
+
+      // Delete reviews by this customer
+      const { error: reviewsError } = await supabaseAdmin
+        .from('reviews')
+        .delete()
+        .eq('customer_id', userId);
+      
+      if (reviewsError) {
+        console.error('⚠️ Backend: Failed to delete reviews:', reviewsError);
+      }
+    }
+
+    // For contractors: clean up contractor-specific data
+    if (userType === 'contractor') {
+      console.log('🗑️ Backend: Cleaning up contractor data...');
+      
+      // Delete quotes by this contractor
+      const { error: quotesError } = await supabaseAdmin
+        .from('quotes')
+        .delete()
+        .eq('contractor_id', userId);
+      
+      if (quotesError) {
+        console.error('⚠️ Backend: Failed to delete quotes:', quotesError);
+      }
+
+      // Delete scheduled jobs for this contractor
+      const { error: scheduledError } = await supabaseAdmin
+        .from('scheduled_jobs')
+        .delete()
+        .eq('contractor_id', userId);
+      
+      if (scheduledError) {
+        console.error('⚠️ Backend: Failed to delete scheduled jobs:', scheduledError);
+      }
+
+      // Delete reviews for this contractor
+      const { error: reviewsError } = await supabaseAdmin
+        .from('reviews')
+        .delete()
+        .eq('contractor_id', userId);
+      
+      if (reviewsError) {
+        console.error('⚠️ Backend: Failed to delete contractor reviews:', reviewsError);
+      }
+    }
+
+    // Delete notifications for this user
+    const { error: notifError } = await supabaseAdmin
+      .from('notifications')
+      .delete()
+      .eq('user_id', userId);
+    
+    if (notifError) {
+      console.error('⚠️ Backend: Failed to delete notifications:', notifError);
+    }
+
+    // Step 3: Delete the auth user account using admin API
+    console.log('🗑️ Backend: Deleting auth user:', userId);
+    const { error: authError } = await supabaseAdmin.auth.admin.deleteUser(userId);
+
+    if (authError) {
+      console.error('❌ Backend: Failed to delete auth user:', authError);
+      return res.status(500).json({
+        error: 'Failed to delete auth user account',
+        details: authError.message,
+      });
+    }
+
+    console.log('✅ Backend: Account fully deleted for user:', userId);
+    res.json({
+      success: true,
+      message: 'Account and all associated data have been permanently deleted',
+    });
+  } catch (error) {
+    console.error('❌ Backend: Unexpected error deleting account:', error);
+    res.status(500).json({
+      error: 'Unexpected error deleting account',
+      details: error.message,
+    });
+  }
+});
+
 // Error handling middleware
 app.use((error, req, res, next) => {
   console.error('Unhandled error:', error);
