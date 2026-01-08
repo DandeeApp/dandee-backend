@@ -193,6 +193,7 @@ const sanitizeScheduledJobPayload = (payload = {}) => {
     'quote_id',
     'contractor_id',
     'job_request_id',
+    'customer_id',
     'title',
     'job_date',
     'start_time',
@@ -751,8 +752,19 @@ app.post('/api/onboarding/complete', async (req, res) => {
     if (profile && typeof profile === 'object' && Object.keys(profile).length > 0) {
       const sanitizedProfile = sanitizeProfilePayload(profile, profileType, userId);
       
+      // CRITICAL: Ensure required NOT NULL fields are present
+      // Both customer_profiles and contractor_profiles require first_name and last_name
+      if (!sanitizedProfile.first_name) {
+        sanitizedProfile.first_name = profile.first_name || '';
+      }
+      if (!sanitizedProfile.last_name) {
+        sanitizedProfile.last_name = profile.last_name || '';
+      }
+      
       console.log('📝 Backend: Sanitized profile after onboarding:', {
         keys: Object.keys(sanitizedProfile),
+        first_name: sanitizedProfile.first_name,
+        last_name: sanitizedProfile.last_name,
         address: sanitizedProfile.address,
         city: sanitizedProfile.city,
         state: sanitizedProfile.state,
@@ -830,8 +842,18 @@ app.post('/api/contractors/profile', async (req, res) => {
       });
     }
 
+    // CRITICAL: Ensure required NOT NULL fields are present for contractor_profiles
+    if (!sanitizedProfile.first_name) {
+      sanitizedProfile.first_name = profile.first_name || '';
+    }
+    if (!sanitizedProfile.last_name) {
+      sanitizedProfile.last_name = profile.last_name || '';
+    }
+
     console.log('🛠️ Backend: Sanitized profile includes:', {
       keys: Object.keys(sanitizedProfile),
+      first_name: sanitizedProfile.first_name,
+      last_name: sanitizedProfile.last_name,
       latitude: sanitizedProfile.latitude,
       longitude: sanitizedProfile.longitude,
     });
