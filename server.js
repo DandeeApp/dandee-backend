@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const stripe = require('stripe');
 const { createClient } = require('@supabase/supabase-js');
+const pushService = require('./pushNotificationService');
 require('dotenv').config();
 
 // Log startup immediately
@@ -82,6 +83,43 @@ if (!supabaseUrl || !supabaseServiceRoleKey) {
     },
   });
   console.log('✅ Supabase admin client initialized for onboarding persistence');
+}
+
+// Initialize Push Notification Service
+try {
+  const pushConfig = {};
+
+  // APNs configuration for iOS
+  if (process.env.APNS_KEY_PATH || process.env.APNS_KEY) {
+    pushConfig.apns = {
+      key: process.env.APNS_KEY_PATH || process.env.APNS_KEY,
+      keyId: process.env.APNS_KEY_ID,
+      teamId: process.env.APNS_TEAM_ID,
+      production: process.env.APNS_PRODUCTION !== 'false',
+    };
+  }
+
+  // FCM configuration for Android
+  if (process.env.FCM_SERVICE_ACCOUNT_PATH || process.env.FCM_SERVICE_ACCOUNT) {
+    try {
+      pushConfig.fcm = {
+        serviceAccountKey: process.env.FCM_SERVICE_ACCOUNT_PATH
+          ? require(process.env.FCM_SERVICE_ACCOUNT_PATH)
+          : JSON.parse(process.env.FCM_SERVICE_ACCOUNT),
+      };
+    } catch (err) {
+      console.warn('⚠️ Failed to parse FCM service account:', err.message);
+    }
+  }
+
+  if (pushConfig.apns || pushConfig.fcm) {
+    pushService.initialize(pushConfig);
+    console.log('✅ Push notification service initialized');
+  } else {
+    console.warn('⚠️ Push notifications not configured (set APNS_* and FCM_* env vars)');
+  }
+} catch (err) {
+  console.error('❌ Failed to initialize push service:', err.message);
 }
 
 const sanitizeProfilePayload = (profile = {}, profileType = 'customer', userId) => {
@@ -1340,7 +1378,7 @@ app.post('/api/notifications/send', async (req, res) => {
   }
 
   try {
-    const { userId, type, title, message, data, actionUrl } = req.body || {};
+    const { userId, type, title, message, data, actionUrl, sendPush = true } = req.body || {};
     const allowedTypes = new Set(['job', 'quote', 'message', 'review', 'payment', 'system']);
 
     if (!userId || !type || !title || !message) {
@@ -1378,9 +1416,56 @@ app.post('/api/notifications/send', async (req, res) => {
       });
     }
 
+    // Send push notification if requested
+    let pushResult = null;
+    if (sendPush) {
+      try {
+        // Get user's device tokens
+        const { data: tokens, error: tokenError } = await supabaseAdmin
+          .from('push_tokens')
+          .select('device_token, platform')
+          .eq('user_id', userId)
+          .eq('is_active', true);
+
+        if (!tokenError && tokens && tokens.length > 0) {
+          console.log(`📱 Sending push to ${tokens.length} device(s) for user ${userId}`);
+          
+          // Send push to all active devices
+          const pushPromises = tokens.map(({ device_token, platform }) =>
+            pushService.sendPushNotification({
+              deviceToken: device_token,
+              platform,
+              title,
+              body: message,
+              data: data || {},
+              sound: 'default',
+              badge: 1,
+            })
+          );
+
+          const pushResults = await Promise.allSettled(pushPromises);
+          const successful = pushResults.filter(r => r.status === 'fulfilled' && r.value.success).length;
+          
+          pushResult = {
+            sent: successful,
+            total: tokens.length,
+            failed: tokens.length - successful,
+          };
+
+          console.log(`📊 Push results: ${successful}/${tokens.length} sent successfully`);
+        } else {
+          console.log(`⚠️ No active push tokens found for user ${userId}`);
+        }
+      } catch (pushError) {
+        console.error('❌ Error sending push notification:', pushError);
+        // Don't fail the request if push fails - notification was still saved
+      }
+    }
+
     res.json({
       success: true,
       notification,
+      push: pushResult,
     });
   } catch (error) {
     console.error('❌ Unexpected error creating notification:', error);
@@ -1874,6 +1959,109 @@ app.post('/api/account/delete', async (req, res) => {
       error: 'Unexpected error deleting account',
       details: error.message,
     });
+  }
+});
+
+// ======================
+// PUSH NOTIFICATION HELPER ENDPOINTS
+// ======================
+
+/**
+ * Trigger notification when a new message is received
+ * POST /api/notifications/message
+ */
+app.post('/api/notifications/message', async (req, res) => {
+  try {
+    const { recipientId, senderName, messagePreview } = req.body;
+
+    if (!recipientId || !senderName) {
+      return res.status(400).json({ error: 'recipientId and senderName required' });
+    }
+
+    await fetch(`${req.protocol}://${req.get('host')}/api/notifications/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: recipientId,
+        type: 'message',
+        title: `New message from ${senderName}`,
+        message: messagePreview || 'You have a new message',
+        data: { type: 'message', senderId: senderName },
+        actionUrl: '/messages',
+        sendPush: true,
+      }),
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Error triggering message notification:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Trigger notification when a new quote is received
+ * POST /api/notifications/quote
+ */
+app.post('/api/notifications/quote', async (req, res) => {
+  try {
+    const { customerId, contractorName, quoteAmount } = req.body;
+
+    if (!customerId || !contractorName) {
+      return res.status(400).json({ error: 'customerId and contractorName required' });
+    }
+
+    await fetch(`${req.protocol}://${req.get('host')}/api/notifications/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: customerId,
+        type: 'quote',
+        title: 'New Quote Received',
+        message: `${contractorName} sent you a quote${quoteAmount ? ` for $${quoteAmount}` : ''}`,
+        data: { type: 'quote', contractor: contractorName },
+        actionUrl: '/quotes',
+        sendPush: true,
+      }),
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Error triggering quote notification:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Trigger notification when a new job request is received
+ * POST /api/notifications/job
+ */
+app.post('/api/notifications/job', async (req, res) => {
+  try {
+    const { contractorId, customerName, jobType } = req.body;
+
+    if (!contractorId || !customerName) {
+      return res.status(400).json({ error: 'contractorId and customerName required' });
+    }
+
+    await fetch(`${req.protocol}://${req.get('host')}/api/notifications/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: contractorId,
+        type: 'job',
+        title: 'New Job Request',
+        message: `${customerName} sent you a ${jobType || 'job'} request`,
+        data: { type: 'job', customer: customerName },
+        actionUrl: '/jobs',
+        sendPush: true,
+      }),
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Error triggering job notification:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
