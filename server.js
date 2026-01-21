@@ -2065,6 +2065,353 @@ app.post('/api/notifications/job', async (req, res) => {
   }
 });
 
+// ==========================================
+// REFERRAL PROGRAM ENDPOINTS
+// ==========================================
+
+// Validate referral code
+app.get('/api/referrals/validate/:code', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ error: 'Supabase not configured' });
+    }
+
+    const { code } = req.params;
+    
+    // Look up the referral code
+    const { data, error } = await supabaseAdmin
+      .from('contractor_referral_codes')
+      .select(`
+        *,
+        contractor_profiles!contractor_referral_codes_contractor_id_fkey (
+          business_name,
+          first_name,
+          last_name
+        )
+      `)
+      .eq('code', code.toUpperCase())
+      .single();
+    
+    if (error) {
+      // Table might not exist yet - return invalid instead of crashing
+      console.log('❌ Referral code lookup error:', error.message);
+      return res.json({ valid: false });
+    }
+    
+    if (!data) {
+      console.log('❌ Referral code not found:', code);
+      return res.json({ valid: false });
+    }
+    
+    // Get contractor profile info for display
+    const profile = data.contractor_profiles;
+    const referrerName = profile?.business_name || 
+                        `${profile?.first_name || ''} ${profile?.last_name || ''}`.trim() ||
+                        'a contractor';
+    
+    console.log('✅ Valid referral code:', code, 'from:', referrerName);
+    res.json({ 
+      valid: true,
+      referrerName: referrerName
+    });
+  } catch (error) {
+    console.error('❌ Error validating referral code:', error);
+    res.json({ valid: false }); // Return invalid instead of 500 error
+  }
+});
+
+// Record a new referral
+app.post('/api/referrals/record', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ error: 'Supabase not configured' });
+    }
+
+    const { referralCode, referredUserId, referredEmail } = req.body;
+    
+    if (!referralCode || !referredUserId) {
+      return res.status(400).json({ error: 'referralCode and referredUserId are required' });
+    }
+    
+    console.log('🎁 Recording referral:', { referralCode, referredUserId, referredEmail });
+    
+    // Look up the referral code to get referrer info
+    const { data: codeData, error: codeError } = await supabaseAdmin
+      .from('contractor_referral_codes')
+      .select('contractor_id, user_id')
+      .eq('code', referralCode.toUpperCase())
+      .single();
+    
+    if (codeError || !codeData) {
+      console.error('❌ Invalid referral code:', referralCode);
+      return res.status(404).json({ error: 'Invalid referral code' });
+    }
+    
+    // Check if this referral already exists (prevent duplicates)
+    const { data: existingReferral } = await supabaseAdmin
+      .from('contractor_referrals')
+      .select('id')
+      .eq('referred_user_id', referredUserId)
+      .single();
+    
+    if (existingReferral) {
+      console.log('⚠️ Referral already exists for user:', referredUserId);
+      return res.json({ success: true, referralId: existingReferral.id, alreadyExists: true });
+    }
+    
+    // Create the referral record
+    const { data: referralData, error: referralError } = await supabaseAdmin
+      .from('contractor_referrals')
+      .insert({
+        referrer_contractor_id: codeData.contractor_id,
+        referrer_user_id: codeData.user_id,
+        referred_user_id: referredUserId,
+        referred_email: referredEmail,
+        referral_code: referralCode.toUpperCase(),
+        status: 'signed_up'
+      })
+      .select()
+      .single();
+    
+    if (referralError) {
+      console.error('❌ Error creating referral record:', referralError);
+      throw referralError;
+    }
+    
+    console.log('✅ Referral recorded successfully:', referralData.id);
+    res.json({ success: true, referralId: referralData.id });
+  } catch (error) {
+    console.error('❌ Error recording referral:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update referral status (e.g., when contractor completes onboarding)
+app.post('/api/referrals/update-status', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ error: 'Supabase not configured' });
+    }
+
+    const { referredUserId, status } = req.body;
+    
+    if (!referredUserId || !status) {
+      return res.status(400).json({ error: 'referredUserId and status are required' });
+    }
+    
+    console.log('📊 Updating referral status:', { referredUserId, status });
+    
+    // Find the referral
+    const { data: referral, error: findError } = await supabaseAdmin
+      .from('contractor_referrals')
+      .select('*')
+      .eq('referred_user_id', referredUserId)
+      .single();
+    
+    if (findError || !referral) {
+      console.log('⚠️ No referral found for user:', referredUserId);
+      return res.json({ success: false, message: 'No referral found' });
+    }
+    
+    // Update the status
+    const updateData = { status };
+    if (status === 'onboarded') {
+      updateData.onboarded_at = new Date().toISOString();
+    }
+    
+    const { error: updateError } = await supabaseAdmin
+      .from('contractor_referrals')
+      .update(updateData)
+      .eq('id', referral.id);
+    
+    if (updateError) {
+      console.error('❌ Error updating referral status:', updateError);
+      throw updateError;
+    }
+    
+    console.log('✅ Referral status updated to:', status);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Error updating referral status:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Generate referral code for a contractor (called after they complete onboarding)
+app.post('/api/referrals/generate-code', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ error: 'Supabase not configured' });
+    }
+
+    const { userId, contractorId } = req.body;
+    
+    if (!userId || !contractorId) {
+      return res.status(400).json({ error: 'userId and contractorId are required' });
+    }
+    
+    console.log('🎲 Generating referral code for contractor:', contractorId);
+    
+    // Check if they already have a code
+    const { data: existing } = await supabaseAdmin
+      .from('contractor_referral_codes')
+      .select('code')
+      .eq('user_id', userId)
+      .single();
+    
+    if (existing) {
+      console.log('✅ Contractor already has code:', existing.code);
+      return res.json({ code: existing.code });
+    }
+    
+    // Get contractor profile to create personalized code
+    const { data: profile } = await supabaseAdmin
+      .from('contractor_profiles')
+      .select('first_name, last_name')
+      .eq('id', contractorId)
+      .single();
+    
+    // Use database function to generate unique code
+    const firstName = profile?.first_name || '';
+    const lastName = profile?.last_name || '';
+    
+    const { data: result, error } = await supabaseAdmin
+      .rpc('generate_unique_referral_code', {
+        p_contractor_id: contractorId,
+        p_user_id: userId,
+        p_first_name: firstName,
+        p_last_name: lastName
+      });
+    
+    if (error) {
+      console.error('❌ Error generating referral code:', error);
+      throw error;
+    }
+    
+    console.log('✅ Generated referral code:', result);
+    res.json({ code: result });
+  } catch (error) {
+    console.error('❌ Error generating referral code:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get contractor's referral stats
+app.get('/api/referrals/stats/:userId', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ error: 'Supabase not configured' });
+    }
+
+    const { userId } = req.params;
+    
+    // Get referral code and stats
+    const { data: codeData } = await supabaseAdmin
+      .from('contractor_referral_codes')
+      .select('*')
+      .eq('user_id', userId)
+      .single();
+    
+    if (!codeData) {
+      return res.json({ 
+        hasCode: false,
+        code: null,
+        stats: null
+      });
+    }
+    
+    // Get detailed referral breakdown
+    const { data: referrals } = await supabaseAdmin
+      .from('contractor_referrals')
+      .select(`
+        *,
+        contractor_profiles!contractor_referrals_referred_contractor_id_fkey (
+          first_name,
+          last_name,
+          business_name
+        )
+      `)
+      .eq('referrer_user_id', userId)
+      .order('created_at', { ascending: false });
+    
+    // Count by status
+    const stats = {
+      total: referrals?.length || 0,
+      signed_up: referrals?.filter(r => r.status === 'signed_up').length || 0,
+      onboarded: referrals?.filter(r => r.status === 'onboarded').length || 0,
+      counted: referrals?.filter(r => r.status === 'counted').length || 0,
+    };
+    
+    res.json({
+      hasCode: true,
+      code: codeData.code,
+      successfulReferrals: codeData.successful_referrals,
+      giftCardEarned: codeData.gift_card_earned,
+      giftCardEarnedAt: codeData.gift_card_earned_at,
+      giftCardSent: codeData.gift_card_sent,
+      stats,
+      referrals: referrals || []
+    });
+  } catch (error) {
+    console.error('❌ Error getting referral stats:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin endpoint: Mark gift card as sent
+app.post('/api/referrals/mark-gift-card-sent', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ error: 'Supabase not configured' });
+    }
+
+    const { userId, notes } = req.body;
+    
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required' });
+    }
+    
+    const { error } = await supabaseAdmin
+      .from('contractor_referral_codes')
+      .update({
+        gift_card_sent: true,
+        gift_card_sent_at: new Date().toISOString(),
+        gift_card_notes: notes || null
+      })
+      .eq('user_id', userId);
+    
+    if (error) throw error;
+    
+    console.log('✅ Marked gift card as sent for user:', userId);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Error marking gift card as sent:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin endpoint: Get all contractors eligible for gift cards
+app.get('/api/referrals/gift-card-eligible', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ error: 'Supabase not configured' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('referral_program_overview')
+      .select('*')
+      .eq('gift_card_earned', true)
+      .order('gift_card_earned_at', { ascending: true });
+    
+    if (error) throw error;
+    
+    res.json({ contractors: data || [] });
+  } catch (error) {
+    console.error('❌ Error getting gift card eligible contractors:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Error handling middleware
 app.use((error, req, res, next) => {
   console.error('Unhandled error:', error);
