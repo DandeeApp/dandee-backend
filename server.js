@@ -975,6 +975,101 @@ app.get('/api/contractors/profile/:userId', async (req, res) => {
   }
 });
 
+// Get past contractors for a customer (for service request form)
+app.get('/api/customers/:customerId/past-contractors', async (req, res) => {
+  if (!supabaseAdmin) {
+    return res.status(503).json({
+      error: 'Supabase admin client not configured',
+      details: 'Check SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables.',
+    });
+  }
+
+  try {
+    const { customerId } = req.params;
+
+    if (!customerId) {
+      return res.status(400).json({
+        error: 'customerId parameter is required',
+      });
+    }
+
+    console.log('📋 Backend: Fetching past contractors for customer:', customerId);
+
+    // Get contractors from invoices
+    const { data: invoices, error: invoicesError } = await supabaseAdmin
+      .from('invoices')
+      .select('contractor_id, created_at')
+      .eq('customer_id', customerId)
+      .order('created_at', { ascending: false });
+
+    if (invoicesError) {
+      console.error('❌ Backend: Error fetching invoices:', invoicesError);
+      return res.status(500).json({
+        error: 'Failed to fetch invoices',
+        details: invoicesError.message,
+      });
+    }
+
+    console.log('📋 Backend: Found', invoices?.length || 0, 'invoices');
+
+    // Extract unique contractor IDs
+    const contractorIds = [...new Set(invoices?.map(inv => inv.contractor_id).filter(Boolean) || [])];
+
+    if (contractorIds.length === 0) {
+      return res.json({
+        success: true,
+        contractors: [],
+      });
+    }
+
+    // Fetch contractor profiles
+    const { data: profiles, error: profilesError } = await supabaseAdmin
+      .from('contractor_profiles')
+      .select('id, user_id, first_name, last_name, business_name, phone, business_email, specialties')
+      .in('user_id', contractorIds);
+
+    if (profilesError) {
+      console.error('❌ Backend: Error fetching contractor profiles:', profilesError);
+      return res.status(500).json({
+        error: 'Failed to fetch contractor profiles',
+        details: profilesError.message,
+      });
+    }
+
+    // Build response with job counts
+    const contractors = profiles?.map(profile => {
+      const jobCount = invoices.filter(inv => inv.contractor_id === profile.user_id).length;
+      const lastJobDate = invoices.find(inv => inv.contractor_id === profile.user_id)?.created_at;
+
+      return {
+        contractor_id: profile.user_id,
+        contractor_name: `${profile.first_name || ''} ${profile.last_name || ''}`.trim() || 'Contractor',
+        business_name: profile.business_name || `${profile.first_name || ''} ${profile.last_name || ''}`.trim(),
+        phone: profile.phone || '',
+        email: profile.business_email || '',
+        total_jobs: jobCount,
+        last_job_date: lastJobDate,
+        specialties: profile.specialties || [],
+      };
+    }) || [];
+
+    console.log('✅ Backend: Returning', contractors.length, 'past contractors');
+
+    res.json({
+      success: true,
+      pastContractors: contractors.sort((a, b) => 
+        new Date(b.last_job_date).getTime() - new Date(a.last_job_date).getTime()
+      ),
+    });
+  } catch (error) {
+    console.error('❌ Backend: Unexpected error fetching past contractors:', error);
+    res.status(500).json({
+      error: 'Unexpected error fetching past contractors',
+      details: error.message,
+    });
+  }
+});
+
 app.post('/api/customers/profile', async (req, res) => {
   if (!supabaseAdmin) {
     return res.status(503).json({
