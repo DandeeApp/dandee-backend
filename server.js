@@ -2,7 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const stripe = require('stripe');
 const { createClient } = require('@supabase/supabase-js');
-const pushService = require('./pushNotificationService');
+const pushService = require('./pushNotificationService'); // Keep for backward compatibility
+const oneSignalService = require('./oneSignalPushService'); // NEW: OneSignal integration
 require('dotenv').config();
 
 // Log startup immediately
@@ -1515,41 +1516,74 @@ app.post('/api/notifications/send', async (req, res) => {
     let pushResult = null;
     if (sendPush) {
       try {
-        // Get user's device tokens
-        const { data: tokens, error: tokenError } = await supabaseAdmin
-          .from('push_tokens')
-          .select('device_token, platform')
-          .eq('user_id', userId)
-          .eq('is_active', true);
-
-        if (!tokenError && tokens && tokens.length > 0) {
-          console.log(`📱 Sending push to ${tokens.length} device(s) for user ${userId}`);
+        // NEW: Use OneSignal for push notifications
+        if (oneSignalService.isConfigured()) {
+          console.log(`📱 Sending OneSignal push to user: ${userId}`);
           
-          // Send push to all active devices
-          const pushPromises = tokens.map(({ device_token, platform }) =>
-            pushService.sendPushNotification({
-              deviceToken: device_token,
-              platform,
-              title,
-              body: message,
-              data: data || {},
-              sound: 'default',
-              badge: 1,
-            })
-          );
+          const oneSignalResult = await oneSignalService.sendToUser({
+            userId,
+            title,
+            body: message,
+            data: data || {},
+            url: actionUrl,
+          });
 
-          const pushResults = await Promise.allSettled(pushPromises);
-          const successful = pushResults.filter(r => r.status === 'fulfilled' && r.value.success).length;
-          
-          pushResult = {
-            sent: successful,
-            total: tokens.length,
-            failed: tokens.length - successful,
-          };
-
-          console.log(`📊 Push results: ${successful}/${tokens.length} sent successfully`);
+          if (oneSignalResult.success) {
+            pushResult = {
+              provider: 'onesignal',
+              sent: oneSignalResult.recipients || 1,
+              id: oneSignalResult.id,
+            };
+            console.log(`✅ OneSignal push sent successfully: ${oneSignalResult.id}`);
+          } else {
+            console.error(`❌ OneSignal push failed: ${oneSignalResult.error}`);
+            pushResult = {
+              provider: 'onesignal',
+              sent: 0,
+              error: oneSignalResult.error,
+            };
+          }
         } else {
-          console.log(`⚠️ No active push tokens found for user ${userId}`);
+          console.warn('⚠️ OneSignal not configured (missing ONESIGNAL_REST_API_KEY)');
+          
+          // FALLBACK: Try Firebase/APNs method (legacy)
+          // Get user's device tokens
+          const { data: tokens, error: tokenError } = await supabaseAdmin
+            .from('push_tokens')
+            .select('device_token, platform')
+            .eq('user_id', userId)
+            .eq('is_active', true);
+
+          if (!tokenError && tokens && tokens.length > 0) {
+            console.log(`📱 Sending push to ${tokens.length} device(s) for user ${userId}`);
+            
+            // Send push to all active devices
+            const pushPromises = tokens.map(({ device_token, platform }) =>
+              pushService.sendPushNotification({
+                deviceToken: device_token,
+                platform,
+                title,
+                body: message,
+                data: data || {},
+                sound: 'default',
+                badge: 1,
+              })
+            );
+
+            const pushResults = await Promise.allSettled(pushPromises);
+            const successful = pushResults.filter(r => r.status === 'fulfilled' && r.value.success).length;
+            
+            pushResult = {
+              provider: 'firebase',
+              sent: successful,
+              total: tokens.length,
+              failed: tokens.length - successful,
+            };
+
+            console.log(`📊 Push results: ${successful}/${tokens.length} sent successfully`);
+          } else {
+            console.log(`⚠️ No active push tokens found for user ${userId}`);
+          }
         }
       } catch (pushError) {
         console.error('❌ Error sending push notification:', pushError);
