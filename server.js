@@ -2375,11 +2375,11 @@ app.post('/api/referrals/generate-code', async (req, res) => {
 
     const { userId, contractorId } = req.body;
     
-    if (!userId || !contractorId) {
-      return res.status(400).json({ error: 'userId and contractorId are required' });
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required' });
     }
     
-    console.log('🎲 Generating referral code for contractor:', contractorId);
+    console.log('🎲 Generating referral code for user:', userId, 'contractor:', contractorId);
     
     // Check if they already have a code
     const { data: existing } = await supabaseAdmin
@@ -2394,19 +2394,28 @@ app.post('/api/referrals/generate-code', async (req, res) => {
     }
     
     // Get contractor profile to create personalized code
-    const { data: profile } = await supabaseAdmin
+    // Use user_id instead of contractor id (which might be temp-)
+    const { data: profile, error: profileError } = await supabaseAdmin
       .from('contractor_profiles')
-      .select('first_name, last_name')
-      .eq('id', contractorId)
+      .select('id, first_name, last_name')
+      .eq('user_id', userId)
       .single();
     
-    // Use database function to generate unique code
+    if (profileError && profileError.code !== 'PGRST116') {
+      console.warn('⚠️ Could not fetch contractor profile:', profileError.message);
+    }
+    
+    // Use the real contractor ID from database, or generate code anyway
+    const realContractorId = profile?.id || contractorId || userId;
     const firstName = profile?.first_name || '';
     const lastName = profile?.last_name || '';
     
+    console.log('🎲 Using contractor data:', { realContractorId, firstName, lastName });
+    
+    // Use database function to generate unique code
     const { data: result, error } = await supabaseAdmin
       .rpc('generate_unique_referral_code', {
-        p_contractor_id: contractorId,
+        p_contractor_id: realContractorId,
         p_user_id: userId,
         p_first_name: firstName,
         p_last_name: lastName
