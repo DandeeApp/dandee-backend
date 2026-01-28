@@ -874,6 +874,59 @@ app.post('/api/onboarding/complete', async (req, res) => {
             console.error('❌ Error in auto-referral generation:', referralError);
             // Don't fail the onboarding - just log it
           }
+          
+          // RECORD REFERRAL if they used a referral code
+          if (metadata?.referral_code || profile?.referral_code) {
+            const usedReferralCode = metadata?.referral_code || profile?.referral_code;
+            console.log('🎁 Recording referral - contractor used code:', usedReferralCode);
+            
+            try {
+              // Look up the referral code to get referrer info
+              const { data: referrerCodeData } = await supabaseAdmin
+                .from('contractor_referral_codes')
+                .select('contractor_id, user_id')
+                .eq('code', usedReferralCode.toUpperCase())
+                .single();
+              
+              if (referrerCodeData) {
+                // Check if referral already exists
+                const { data: existingReferral } = await supabaseAdmin
+                  .from('contractor_referrals')
+                  .select('id')
+                  .eq('referred_user_id', userId)
+                  .single();
+                
+                if (!existingReferral) {
+                  // Create the referral record
+                  const { error: referralRecordError } = await supabaseAdmin
+                    .from('contractor_referrals')
+                    .insert({
+                      referrer_contractor_id: referrerCodeData.contractor_id,
+                      referrer_user_id: referrerCodeData.user_id,
+                      referred_contractor_id: profileData.id,
+                      referred_user_id: userId,
+                      referred_email: sanitizedProfile.business_email || profile.business_email,
+                      referral_code: usedReferralCode.toUpperCase(),
+                      status: 'signed_up'
+                    });
+                  
+                  if (referralRecordError) {
+                    console.error('❌ Failed to record referral:', referralRecordError);
+                  } else {
+                    console.log('✅ Referral recorded successfully');
+                    responseBody.referralRecorded = true;
+                  }
+                } else {
+                  console.log('ℹ️ Referral already exists for this user');
+                }
+              } else {
+                console.warn('⚠️ Referral code not found:', usedReferralCode);
+              }
+            } catch (referralRecordError) {
+              console.error('❌ Error recording referral:', referralRecordError);
+              // Don't fail onboarding - just log it
+            }
+          }
         }
       } else {
         console.log('📝 Profile payload sanitized to empty object, skipping upsert');
