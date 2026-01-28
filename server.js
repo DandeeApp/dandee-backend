@@ -908,8 +908,7 @@ app.post('/api/onboarding/complete', async (req, res) => {
                       referred_email: sanitizedProfile.business_email || profile.business_email,
                       referral_code: usedReferralCode.toUpperCase(),
                       status: 'onboarded', // Set to 'onboarded' immediately since they're completing onboarding
-                      onboarded_at: new Date().toISOString(),
-                      counted: true // Mark as counted immediately
+                      onboarded_at: new Date().toISOString()
                     });
                   
                   if (referralRecordError) {
@@ -925,8 +924,7 @@ app.post('/api/onboarding/complete', async (req, res) => {
                     .from('contractor_referrals')
                     .update({
                       status: 'onboarded',
-                      onboarded_at: new Date().toISOString(),
-                      counted: true
+                      onboarded_at: new Date().toISOString()
                     })
                     .eq('id', existingReferral.id);
                   
