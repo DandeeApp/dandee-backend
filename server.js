@@ -831,6 +831,50 @@ app.post('/api/onboarding/complete', async (req, res) => {
 
         responseBody.profileUpdated = true;
         responseBody.profileData = profileData;
+        
+        // AUTOMATIC REFERRAL CODE GENERATION for contractors after onboarding
+        if (profileType === 'contractor' && profileData) {
+          console.log('🎁 Auto-generating referral code for new contractor:', userId);
+          try {
+            // Check if they already have a code
+            const { data: existingCode } = await supabaseAdmin
+              .from('contractor_referral_codes')
+              .select('code')
+              .eq('user_id', userId)
+              .single();
+            
+            if (!existingCode) {
+              // Generate referral code using the database function
+              const firstName = profileData.first_name || sanitizedProfile.first_name || '';
+              const lastName = profileData.last_name || sanitizedProfile.last_name || '';
+              const contractorId = profileData.id;
+              
+              console.log('🎁 Generating code with:', { contractorId, userId, firstName, lastName });
+              
+              const { data: referralCode, error: codeError } = await supabaseAdmin
+                .rpc('generate_unique_referral_code', {
+                  p_contractor_id: contractorId,
+                  p_user_id: userId,
+                  p_first_name: firstName,
+                  p_last_name: lastName
+                });
+              
+              if (codeError) {
+                console.error('❌ Failed to auto-generate referral code:', codeError);
+                // Don't fail the onboarding - just log it
+              } else {
+                console.log('✅ Auto-generated referral code:', referralCode);
+                responseBody.referralCode = referralCode;
+              }
+            } else {
+              console.log('✅ Contractor already has referral code:', existingCode.code);
+              responseBody.referralCode = existingCode.code;
+            }
+          } catch (referralError) {
+            console.error('❌ Error in auto-referral generation:', referralError);
+            // Don't fail the onboarding - just log it
+          }
+        }
       } else {
         console.log('📝 Profile payload sanitized to empty object, skipping upsert');
       }
