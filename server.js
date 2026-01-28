@@ -897,7 +897,7 @@ app.post('/api/onboarding/complete', async (req, res) => {
                   .single();
                 
                 if (!existingReferral) {
-                  // Create the referral record
+                  // Create the referral record with status 'onboarded' since they're completing onboarding now
                   const { error: referralRecordError } = await supabaseAdmin
                     .from('contractor_referrals')
                     .insert({
@@ -907,17 +907,34 @@ app.post('/api/onboarding/complete', async (req, res) => {
                       referred_user_id: userId,
                       referred_email: sanitizedProfile.business_email || profile.business_email,
                       referral_code: usedReferralCode.toUpperCase(),
-                      status: 'signed_up'
+                      status: 'onboarded', // Set to 'onboarded' immediately since they're completing onboarding
+                      onboarded_at: new Date().toISOString(),
+                      counted: true // Mark as counted immediately
                     });
                   
                   if (referralRecordError) {
                     console.error('❌ Failed to record referral:', referralRecordError);
                   } else {
-                    console.log('✅ Referral recorded successfully');
+                    console.log('✅ Referral recorded successfully as onboarded');
                     responseBody.referralRecorded = true;
                   }
                 } else {
-                  console.log('ℹ️ Referral already exists for this user');
+                  console.log('ℹ️ Referral already exists - updating to onboarded');
+                  // Update existing referral to onboarded
+                  const { error: updateError } = await supabaseAdmin
+                    .from('contractor_referrals')
+                    .update({
+                      status: 'onboarded',
+                      onboarded_at: new Date().toISOString(),
+                      counted: true
+                    })
+                    .eq('id', existingReferral.id);
+                  
+                  if (updateError) {
+                    console.error('❌ Failed to update referral status:', updateError);
+                  } else {
+                    console.log('✅ Referral updated to onboarded');
+                  }
                 }
               } else {
                 console.warn('⚠️ Referral code not found:', usedReferralCode);
