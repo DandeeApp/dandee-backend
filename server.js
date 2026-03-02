@@ -3128,21 +3128,6 @@ app.get('/api/fleet/admin/:adminId/reports', async (req, res) => {
 // END FLEET MANAGEMENT ENDPOINTS
 // ================================================================
 
-// Error handling middleware
-app.use((error, req, res, next) => {
-  console.error('Unhandled error:', error);
-  res.status(500).json({ 
-    error: 'Internal server error',
-    details: error.message 
-  });
-});
-
-// 404 handler
-app.use('*', (req, res) => {
-  res.status(404).json({ error: 'Endpoint not found' });
-});
-
-// Bind to 0.0.0.0 for Railway/Docker compatibility
 // ============================================================
 // INVITATION ENDPOINTS
 // ============================================================
@@ -3184,6 +3169,21 @@ app.get('/api/contractors/:contractorId/invitations', async (req, res) => {
   }
 });
 
+// Error handling middleware
+app.use((error, req, res, next) => {
+  console.error('Unhandled error:', error);
+  res.status(500).json({ 
+    error: 'Internal server error',
+    details: error.message 
+  });
+});
+
+// 404 handler
+app.use('*', (req, res) => {
+  res.status(404).json({ error: 'Endpoint not found' });
+});
+
+// Bind to 0.0.0.0 for Railway/Docker compatibility
 // Start server
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Dandee API server running on port ${PORT}`);
