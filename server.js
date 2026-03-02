@@ -3169,6 +3169,95 @@ app.get('/api/contractors/:contractorId/invitations', async (req, res) => {
   }
 });
 
+// Create invitation
+app.post('/api/contractors/:contractorId/invitations', async (req, res) => {
+  const { contractorId } = req.params;
+  const { client_name, client_email, client_phone, notes, relationship_context, contractor_name } = req.body;
+  
+  console.log(`📝 Creating invitation for contractor: ${contractorId}`);
+
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: 'Database not configured' });
+  }
+
+  if (!client_email && !client_phone) {
+    return res.status(400).json({ error: 'Either email or phone number is required' });
+  }
+
+  try {
+    // Generate invitation code
+    const { data: codeData, error: codeError } = await supabaseAdmin
+      .rpc('generate_invitation_code', { p_contractor_id: contractorId });
+
+    if (codeError) {
+      console.error('❌ Error generating invitation code:', codeError);
+      return res.status(500).json({ error: codeError.message });
+    }
+
+    const invitationCode = codeData;
+    const invitationUrl = `https://dandee.app/accept-invitation/${invitationCode}`;
+
+    // Create invitation record
+    const { data, error } = await supabaseAdmin
+      .from('contractor_client_invitations')
+      .insert([{
+        contractor_id: contractorId,
+        client_name,
+        client_email: client_email || null,
+        client_phone: client_phone || null,
+        invitation_code: invitationCode,
+        invitation_url: invitationUrl,
+        notes: notes || null,
+        relationship_context: relationship_context || null,
+        status: 'pending',
+      }])
+      .select()
+      .single();
+
+    if (error) {
+      console.error('❌ Error creating invitation:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    console.log(`✅ Invitation created: ${data.id}`);
+
+    // Send email if client has email
+    if (client_email && process.env.RESEND_API_KEY) {
+      try {
+        const { Resend } = require('resend');
+        const resend = new Resend(process.env.RESEND_API_KEY);
+
+        const { error: emailError } = await resend.emails.send({
+          from: 'Dandee <onboarding@dandee.app>',
+          to: [client_email],
+          subject: `${contractor_name} invited you to join Dandee!`,
+          html: `
+            <h2>You've been invited to Dandee!</h2>
+            <p>Hi ${client_name},</p>
+            <p><strong>${contractor_name}</strong> has invited you to join Dandee to make managing home services easier.</p>
+            <p><a href="${invitationUrl}" style="background-color: #4F46E5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">Accept Invitation</a></p>
+            <p>Or copy this link: ${invitationUrl}</p>
+            <p>This invitation will expire in 30 days.</p>
+          `,
+        });
+
+        if (emailError) {
+          console.error('❌ Error sending email:', emailError);
+        } else {
+          console.log(`✅ Email sent to ${client_email}`);
+        }
+      } catch (emailError) {
+        console.error('❌ Exception sending email:', emailError);
+      }
+    }
+
+    res.json(data);
+  } catch (error) {
+    console.error('❌ Exception in create invitation endpoint:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Cancel invitation
 app.patch('/api/invitations/:invitationId/cancel', async (req, res) => {
   const { invitationId } = req.params;
