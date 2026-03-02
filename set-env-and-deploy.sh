@@ -43,3 +43,5 @@ echo "2. Test health endpoint: curl https://YOUR-URL.up.railway.app/api/health"
 echo "3. Update iOS app if URL is different from dandee-backend-production.up.railway.app"
 echo ""
 
+
+

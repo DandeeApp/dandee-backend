@@ -64,3 +64,5 @@ if [ "$1" == "--deploy" ]; then
     railway domain
 fi
 
+
+

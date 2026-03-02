@@ -22,6 +22,7 @@
     "express": "^4.18.2",
     "firebase-admin": "^13.6.0",
     "node-apn": "^3.0.0",
+    "resend": "^3.2.0",
     "stripe": "^12.0.0"
   },
   "devDependencies": {
