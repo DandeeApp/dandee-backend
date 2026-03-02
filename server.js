@@ -274,7 +274,12 @@ const sanitizeScheduledJobPayload = (payload = {}) => {
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', message: 'Stripe API server is running' });
+  res.json({ 
+    status: 'OK', 
+    message: 'Stripe API server is running',
+    version: 'v2.2-invitations-endpoint-added',
+    timestamp: new Date().toISOString()
+  });
 });
 
 // Create review (bypasses RLS using admin client)
