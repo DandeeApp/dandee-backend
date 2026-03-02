@@ -2662,6 +2662,467 @@ app.get('/api/referrals/gift-card-eligible', async (req, res) => {
   }
 });
 
+// ================================================================
+// FLEET MANAGEMENT ENDPOINTS
+// ================================================================
+
+// Helper function to generate a secure temporary password
+function generateSecurePassword() {
+  const length = 12;
+  const charset = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*';
+  let password = '';
+  for (let i = 0; i < length; i++) {
+    const randomIndex = Math.floor(Math.random() * charset.length);
+    password += charset[randomIndex];
+  }
+  return password;
+}
+
+// Create Fleet Tech with Credentials
+app.post('/api/fleet/techs/create-with-credentials', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ error: 'Supabase not configured' });
+    }
+
+    const { fleetAdminId, adminUserId, techData } = req.body;
+    
+    if (!fleetAdminId || !adminUserId || !techData) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const { firstName, lastName, email, phone, employeeId, specialties } = techData;
+
+    if (!firstName || !lastName || !email) {
+      return res.status(400).json({ error: 'First name, last name, and email are required' });
+    }
+
+    // Check if email already exists
+    const { data: existingUser } = await supabaseAdmin.auth.admin.getUserByEmail(email);
+    if (existingUser?.user) {
+      return res.status(400).json({ error: 'A user with this email already exists' });
+    }
+
+    // Check tech limit
+    const { data: adminProfile, error: adminError } = await supabaseAdmin
+      .from('fleet_admin_profiles')
+      .select('max_techs, active_techs_count, subscription_status')
+      .eq('id', fleetAdminId)
+      .single();
+
+    if (adminError) throw adminError;
+
+    if (adminProfile.active_techs_count >= adminProfile.max_techs) {
+      return res.status(400).json({
+        error: `Tech limit reached. You have ${adminProfile.active_techs_count} active techs (max: ${adminProfile.max_techs}). Upgrade your subscription to add more.`
+      });
+    }
+
+    if (!['active', 'trial'].includes(adminProfile.subscription_status)) {
+      return res.status(400).json({
+        error: `Cannot add techs. Subscription is ${adminProfile.subscription_status}`
+      });
+    }
+
+    // Generate temporary password
+    const temporaryPassword = generateSecurePassword();
+
+    // Create Supabase auth user
+    const { data: authUser, error: authError } = await supabaseAdmin.auth.admin.createUser({
+      email: email,
+      password: temporaryPassword,
+      email_confirm: true, // Auto-confirm email
+      user_metadata: {
+        user_type: 'fleet_tech',
+        first_name: firstName,
+        last_name: lastName,
+        fleet_admin_id: fleetAdminId
+      }
+    });
+
+    if (authError) {
+      console.error('❌ Error creating auth user:', authError);
+      throw authError;
+    }
+
+    console.log('✅ Created auth user for tech:', authUser.user.id);
+
+    // Create fleet tech profile
+    const { data: techProfile, error: techError } = await supabaseAdmin
+      .from('fleet_techs')
+      .insert({
+        user_id: authUser.user.id,
+        fleet_admin_id: fleetAdminId,
+        first_name: firstName,
+        last_name: lastName,
+        email: email,
+        phone: phone || null,
+        employee_id: employeeId || null,
+        specialties: specialties || [],
+        employment_status: 'active',
+        password_changed: false,
+        password_reset_required: true,
+        created_by_admin_id: fleetAdminId
+      })
+      .select()
+      .single();
+
+    if (techError) {
+      // Rollback: delete the auth user
+      await supabaseAdmin.auth.admin.deleteUser(authUser.user.id);
+      console.error('❌ Error creating tech profile:', techError);
+      throw techError;
+    }
+
+    console.log('✅ Created fleet tech profile:', techProfile.id);
+
+    res.json({
+      success: true,
+      techId: techProfile.id,
+      userId: authUser.user.id,
+      temporaryPassword: temporaryPassword,
+      message: `Tech account created for ${firstName} ${lastName}`
+    });
+
+  } catch (error) {
+    console.error('❌ Error creating tech with credentials:', error);
+    res.status(500).json({ error: error.message || 'Failed to create tech account' });
+  }
+});
+
+// Get Fleet Admin Profile
+app.get('/api/fleet/admin/profile/:userId', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ error: 'Supabase not configured' });
+    }
+
+    const { userId } = req.params;
+
+    const { data, error } = await supabaseAdmin
+      .from('fleet_admin_profiles')
+      .select('*')
+      .eq('user_id', userId)
+      .single();
+
+    if (error) throw error;
+
+    res.json({ profile: data });
+  } catch (error) {
+    console.error('❌ Error getting fleet admin profile:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get Fleet Techs for Admin
+app.get('/api/fleet/admin/:adminId/techs', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ error: 'Supabase not configured' });
+    }
+
+    const { adminId } = req.params;
+
+    const { data, error } = await supabaseAdmin
+      .from('fleet_techs')
+      .select('*')
+      .eq('fleet_admin_id', adminId)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+
+    res.json({ techs: data || [] });
+  } catch (error) {
+    console.error('❌ Error getting fleet techs:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update Tech Status
+app.patch('/api/fleet/techs/:techId/status', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ error: 'Supabase not configured' });
+    }
+
+    const { techId } = req.params;
+    const { employment_status } = req.body;
+
+    if (!['active', 'inactive', 'suspended'].includes(employment_status)) {
+      return res.status(400).json({ error: 'Invalid employment status' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('fleet_techs')
+      .update({ employment_status, updated_at: new Date().toISOString() })
+      .eq('id', techId)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.json({ success: true, tech: data });
+  } catch (error) {
+    console.error('❌ Error updating tech status:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Reset Tech Password (Admin action)
+app.post('/api/fleet/techs/:techId/reset-password', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ error: 'Supabase not configured' });
+    }
+
+    const { techId } = req.params;
+
+    // Get tech info
+    const { data: tech, error: techError } = await supabaseAdmin
+      .from('fleet_techs')
+      .select('user_id, first_name, last_name, email')
+      .eq('id', techId)
+      .single();
+
+    if (techError) throw techError;
+
+    // Generate new temporary password
+    const newPassword = generateSecurePassword();
+
+    // Update auth user password
+    const { error: updateError } = await supabaseAdmin.auth.admin.updateUserById(
+      tech.user_id,
+      { password: newPassword }
+    );
+
+    if (updateError) throw updateError;
+
+    // Update tech profile
+    await supabaseAdmin
+      .from('fleet_techs')
+      .update({
+        password_changed: false,
+        password_reset_required: true,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', techId);
+
+    console.log('✅ Reset password for tech:', tech.email);
+
+    res.json({
+      success: true,
+      temporaryPassword: newPassword,
+      email: tech.email,
+      message: `Password reset for ${tech.first_name} ${tech.last_name}`
+    });
+
+  } catch (error) {
+    console.error('❌ Error resetting tech password:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Tech Change Password (First login)
+app.post('/api/fleet/techs/change-password', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ error: 'Supabase not configured' });
+    }
+
+    const { userId, newPassword } = req.body;
+
+    if (!userId || !newPassword) {
+      return res.status(400).json({ error: 'userId and newPassword are required' });
+    }
+
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+
+    // Update auth password
+    const { error: updateError } = await supabaseAdmin.auth.admin.updateUserById(
+      userId,
+      { password: newPassword }
+    );
+
+    if (updateError) throw updateError;
+
+    // Update tech profile
+    const { error: techError } = await supabaseAdmin
+      .from('fleet_techs')
+      .update({
+        password_changed: true,
+        password_reset_required: false,
+        last_login_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .eq('user_id', userId);
+
+    if (techError) throw techError;
+
+    console.log('✅ Tech changed password:', userId);
+
+    res.json({ success: true, message: 'Password changed successfully' });
+
+  } catch (error) {
+    console.error('❌ Error changing tech password:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create Tech Assignment
+app.post('/api/fleet/assignments', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ error: 'Supabase not configured' });
+    }
+
+    const { fleetAdminId, fleetTechId, jobRequestId, assignmentType, scheduledDate, scheduledTime, adminInstructions, priority } = req.body;
+
+    if (!fleetAdminId || !fleetTechId || !jobRequestId || !assignmentType) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('tech_assignments')
+      .insert({
+        fleet_admin_id: fleetAdminId,
+        fleet_tech_id: fleetTechId,
+        job_request_id: jobRequestId,
+        assignment_type: assignmentType,
+        status: 'assigned',
+        scheduled_date: scheduledDate || null,
+        scheduled_time: scheduledTime || null,
+        admin_instructions: adminInstructions || null,
+        priority: priority || 'normal'
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    console.log('✅ Created tech assignment:', data.id);
+
+    res.json({ success: true, assignment: data });
+
+  } catch (error) {
+    console.error('❌ Error creating assignment:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get Tech Assignments (for Tech)
+app.get('/api/fleet/techs/:techId/assignments', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ error: 'Supabase not configured' });
+    }
+
+    const { techId } = req.params;
+    const { status } = req.query;
+
+    let query = supabaseAdmin
+      .from('tech_assignments')
+      .select('*, job_requests(*)')
+      .eq('fleet_tech_id', techId)
+      .order('created_at', { ascending: false });
+
+    if (status) {
+      query = query.eq('status', status);
+    }
+
+    const { data, error } = await query;
+
+    if (error) throw error;
+
+    res.json({ assignments: data || [] });
+
+  } catch (error) {
+    console.error('❌ Error getting tech assignments:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Submit Tech Report
+app.post('/api/fleet/reports', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ error: 'Supabase not configured' });
+    }
+
+    const reportData = req.body;
+
+    if (!reportData.assignment_id || !reportData.fleet_tech_id || !reportData.job_request_id || !reportData.report_type) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('tech_reports')
+      .insert(reportData)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    console.log('✅ Created tech report:', data.id);
+
+    res.json({ success: true, report: data });
+
+  } catch (error) {
+    console.error('❌ Error creating tech report:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get Reports for Admin
+app.get('/api/fleet/admin/:adminId/reports', async (req, res) => {
+  try {
+    if (!supabaseAdmin) {
+      return res.status(503).json({ error: 'Supabase not configured' });
+    }
+
+    const { adminId } = req.params;
+    const { status } = req.query;
+
+    // Get all techs for this admin
+    const { data: techs } = await supabaseAdmin
+      .from('fleet_techs')
+      .select('id')
+      .eq('fleet_admin_id', adminId);
+
+    if (!techs || techs.length === 0) {
+      return res.json({ reports: [] });
+    }
+
+    const techIds = techs.map(t => t.id);
+
+    let query = supabaseAdmin
+      .from('tech_reports')
+      .select('*, fleet_techs(first_name, last_name), job_requests(*)')
+      .in('fleet_tech_id', techIds)
+      .order('submitted_at', { ascending: false, nullsFirst: false })
+      .order('created_at', { ascending: false });
+
+    if (status) {
+      query = query.eq('status', status);
+    }
+
+    const { data, error } = await query;
+
+    if (error) throw error;
+
+    res.json({ reports: data || [] });
+
+  } catch (error) {
+    console.error('❌ Error getting admin reports:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ================================================================
+// END FLEET MANAGEMENT ENDPOINTS
+// ================================================================
+
 // Error handling middleware
 app.use((error, req, res, next) => {
   console.error('Unhandled error:', error);
@@ -2677,6 +3138,48 @@ app.use('*', (req, res) => {
 });
 
 // Bind to 0.0.0.0 for Railway/Docker compatibility
+// ============================================================
+// INVITATION ENDPOINTS
+// ============================================================
+
+// Get contractor invitations
+app.get('/api/contractors/:contractorId/invitations', async (req, res) => {
+  const { contractorId } = req.params;
+  const { status } = req.query;
+  
+  console.log(`📧 Fetching invitations for contractor: ${contractorId}, status: ${status || 'all'}`);
+
+  if (!supabase) {
+    return res.status(500).json({ error: 'Database not configured' });
+  }
+
+  try {
+    let query = supabase
+      .from('contractor_client_invitations')
+      .select('*')
+      .eq('contractor_id', contractorId)
+      .order('created_at', { ascending: false });
+
+    if (status && status !== 'all') {
+      query = query.eq('status', status);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error('❌ Error fetching invitations:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    console.log(`✅ Found ${data.length} invitations`);
+    res.json(data);
+  } catch (error) {
+    console.error('❌ Exception in invitations endpoint:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Start server
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Dandee API server running on port ${PORT}`);
   console.log(`📊 Health check: /api/health`);
