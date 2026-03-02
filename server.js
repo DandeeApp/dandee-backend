@@ -3169,6 +3169,73 @@ app.get('/api/contractors/:contractorId/invitations', async (req, res) => {
   }
 });
 
+// Cancel invitation
+app.patch('/api/invitations/:invitationId/cancel', async (req, res) => {
+  const { invitationId } = req.params;
+  
+  console.log(`🚫 Cancelling invitation: ${invitationId}`);
+
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: 'Database not configured' });
+  }
+
+  try {
+    const { error } = await supabaseAdmin
+      .from('contractor_client_invitations')
+      .update({ status: 'cancelled', updated_at: new Date().toISOString() })
+      .eq('id', invitationId);
+
+    if (error) {
+      console.error('❌ Error cancelling invitation:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    console.log(`✅ Invitation cancelled: ${invitationId}`);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Exception in cancel invitation endpoint:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Resend invitation
+app.patch('/api/invitations/:invitationId/resend', async (req, res) => {
+  const { invitationId } = req.params;
+  
+  console.log(`📨 Resending invitation: ${invitationId}`);
+
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: 'Database not configured' });
+  }
+
+  try {
+    const newExpiresAt = new Date();
+    newExpiresAt.setDate(newExpiresAt.getDate() + 30);
+
+    const { data, error } = await supabaseAdmin
+      .from('contractor_client_invitations')
+      .update({
+        expires_at: newExpiresAt.toISOString(),
+        status: 'pending',
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', invitationId)
+      .select()
+      .single();
+
+    if (error) {
+      console.error('❌ Error resending invitation:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    console.log(`✅ Invitation resent: ${invitationId}`);
+    res.json(data);
+  } catch (error) {
+    console.error('❌ Exception in resend invitation endpoint:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Error handling middleware
 app.use((error, req, res, next) => {
   console.error('Unhandled error:', error);
