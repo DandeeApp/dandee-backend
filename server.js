@@ -3139,12 +3139,12 @@ app.get('/api/contractors/:contractorId/invitations', async (req, res) => {
   
   console.log(`📧 Fetching invitations for contractor: ${contractorId}, status: ${status || 'all'}`);
 
-  if (!supabase) {
+  if (!supabaseAdmin) {
     return res.status(500).json({ error: 'Database not configured' });
   }
 
   try {
-    let query = supabase
+    let query = supabaseAdmin
       .from('contractor_client_invitations')
       .select('*')
       .eq('contractor_id', contractorId)
