@@ -4,6 +4,7 @@ const stripe = require('stripe');
 const { createClient } = require('@supabase/supabase-js');
 const pushService = require('./pushNotificationService'); // Keep for backward compatibility
 const oneSignalService = require('./oneSignalPushService'); // NEW: OneSignal integration
+const { Resend } = require('resend');
 require('dotenv').config();
 
 // Log startup immediately
@@ -62,6 +63,19 @@ try {
   console.log('✅ Stripe client initialized');
 } catch (err) {
   console.error('❌ Failed to initialize Stripe:', err.message);
+}
+
+// Initialize Resend for email
+let resendClient = null;
+if (process.env.RESEND_API_KEY) {
+  try {
+    resendClient = new Resend(process.env.RESEND_API_KEY);
+    console.log('✅ Resend email client initialized');
+  } catch (err) {
+    console.error('❌ Failed to initialize Resend:', err.message);
+  }
+} else {
+  console.warn('⚠️  WARNING: RESEND_API_KEY not set - email sending will be disabled');
 }
 
 const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
@@ -3222,33 +3236,38 @@ app.post('/api/contractors/:contractorId/invitations', async (req, res) => {
     console.log(`✅ Invitation created: ${data.id}`);
 
     // Send email if client has email
-    if (client_email && process.env.RESEND_API_KEY) {
-      try {
-        const { Resend } = require('resend');
-        const resend = new Resend(process.env.RESEND_API_KEY);
+    if (client_email) {
+      console.log(`📧 Attempting to send email to: ${client_email}`);
+      
+      if (!resendClient) {
+        console.error('❌ Cannot send email - Resend client not initialized (RESEND_API_KEY missing)');
+      } else {
+        try {
+          const { data: emailData, error: emailError } = await resendClient.emails.send({
+            from: 'Dandee <onboarding@dandee.app>',
+            to: [client_email],
+            subject: `${contractor_name} invited you to join Dandee!`,
+            html: `
+              <h2>You've been invited to Dandee!</h2>
+              <p>Hi ${client_name},</p>
+              <p><strong>${contractor_name}</strong> has invited you to join Dandee to make managing home services easier.</p>
+              <p><a href="${invitationUrl}" style="background-color: #4F46E5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">Accept Invitation</a></p>
+              <p>Or copy this link: ${invitationUrl}</p>
+              <p>This invitation will expire in 30 days.</p>
+            `,
+          });
 
-        const { error: emailError } = await resend.emails.send({
-          from: 'Dandee <onboarding@dandee.app>',
-          to: [client_email],
-          subject: `${contractor_name} invited you to join Dandee!`,
-          html: `
-            <h2>You've been invited to Dandee!</h2>
-            <p>Hi ${client_name},</p>
-            <p><strong>${contractor_name}</strong> has invited you to join Dandee to make managing home services easier.</p>
-            <p><a href="${invitationUrl}" style="background-color: #4F46E5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">Accept Invitation</a></p>
-            <p>Or copy this link: ${invitationUrl}</p>
-            <p>This invitation will expire in 30 days.</p>
-          `,
-        });
-
-        if (emailError) {
-          console.error('❌ Error sending email:', emailError);
-        } else {
-          console.log(`✅ Email sent to ${client_email}`);
+          if (emailError) {
+            console.error('❌ Error sending email:', emailError);
+          } else {
+            console.log(`✅ Email sent successfully to ${client_email}`, emailData);
+          }
+        } catch (emailError) {
+          console.error('❌ Exception sending email:', emailError);
         }
-      } catch (emailError) {
-        console.error('❌ Exception sending email:', emailError);
       }
+    } else {
+      console.log('ℹ️  No email address provided - skipping email send');
     }
 
     res.json(data);
@@ -3315,6 +3334,35 @@ app.patch('/api/invitations/:invitationId/resend', async (req, res) => {
     if (error) {
       console.error('❌ Error resending invitation:', error);
       return res.status(500).json({ error: error.message });
+    }
+
+    // Send email if available
+    if (data.client_email && resendClient) {
+      try {
+        console.log(`📧 Sending resend email to: ${data.client_email}`);
+        
+        const { data: emailData, error: emailError } = await resendClient.emails.send({
+          from: 'Dandee <onboarding@dandee.app>',
+          to: [data.client_email],
+          subject: `Reminder: ${data.contractor_name || 'Your contractor'} invited you to join Dandee!`,
+          html: `
+            <h2>Reminder: You've been invited to Dandee!</h2>
+            <p>Hi ${data.client_name},</p>
+            <p>This is a reminder that you have a pending invitation to join Dandee.</p>
+            <p><a href="${data.invitation_url}" style="background-color: #4F46E5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">Accept Invitation</a></p>
+            <p>Or copy this link: ${data.invitation_url}</p>
+            <p>This invitation will expire in 30 days.</p>
+          `,
+        });
+
+        if (emailError) {
+          console.error('❌ Error sending resend email:', emailError);
+        } else {
+          console.log(`✅ Resend email sent successfully to ${data.client_email}`, emailData);
+        }
+      } catch (emailError) {
+        console.error('❌ Exception sending resend email:', emailError);
+      }
     }
 
     console.log(`✅ Invitation resent: ${invitationId}`);
