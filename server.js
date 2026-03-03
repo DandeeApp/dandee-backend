@@ -3237,6 +3237,33 @@ app.post('/api/contractors/:contractorId/invitations', async (req, res) => {
 
     console.log(`✅ Invitation created: ${data.id}`);
 
+    // Create CRM entry immediately with "invited" status
+    // This allows contractor to see invited clients before they accept
+    try {
+      const { error: crmError } = await supabaseAdmin
+        .from('crm_clients')
+        .insert({
+          contractor_id: contractorId,
+          name: client_name,
+          email: client_email || null,
+          phone: client_phone || null,
+          status: 'invited', // Special status for pending invitations
+          source: 'invitation',
+          invitation_id: data.id,
+          notes: notes || 'Invited to join Dandee',
+        });
+
+      if (crmError) {
+        // Don't fail the invitation if CRM entry fails, just log it
+        console.warn('⚠️ Warning: Could not create CRM entry for invitation:', crmError);
+      } else {
+        console.log(`✅ CRM entry created for invited client: ${client_name}`);
+      }
+    } catch (crmError) {
+      console.warn('⚠️ Warning: Exception creating CRM entry:', crmError);
+    }
+
+
     // Send email if client has email
     if (client_email) {
       console.log(`📧 Attempting to send email to: ${client_email}`);
@@ -3480,7 +3507,29 @@ app.post('/api/invitations/:invitationCode/accept', async (req, res) => {
       return res.status(404).json({ error: 'Invitation not found or already accepted' });
     }
 
-    console.log(`✅ Invitation accepted: ${invitationCode}, trigger will create CRM entry`);
+    console.log(`✅ Invitation accepted: ${invitationCode}`);
+
+    // Update the CRM entry from "invited" to "active" and link the customer_id
+    try {
+      const { error: crmError } = await supabaseAdmin
+        .from('crm_clients')
+        .update({
+          customer_id: client_user_id,
+          status: 'active',
+          updated_at: new Date().toISOString()
+        })
+        .eq('invitation_id', data.id)
+        .eq('contractor_id', data.contractor_id);
+
+      if (crmError) {
+        console.warn('⚠️ Warning: Could not update CRM entry:', crmError);
+      } else {
+        console.log(`✅ CRM entry updated to active for user: ${client_user_id}`);
+      }
+    } catch (crmError) {
+      console.warn('⚠️ Warning: Exception updating CRM entry:', crmError);
+    }
+
     res.json(data);
   } catch (error) {
     console.error('❌ Exception in accept invitation endpoint:', error);
