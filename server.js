@@ -3758,20 +3758,19 @@ app.post('/api/invitations/link-by-email', async (req, res) => {
   }
 
   try {
-    // 1. Find the user by email in auth.users
-    const { data: users, error: userError } = await supabaseAdmin.auth.admin.listUsers();
+    // 1. Find the user by email in customer_profiles (using their auth email)
+    const { data: authUser, error: authError } = await supabaseAdmin.auth.admin.getUserByEmail(email);
     
-    if (userError) {
-      console.error('❌ Error fetching users:', userError);
-      return res.status(500).json({ error: userError.message });
-    }
-
-    const user = users.users.find(u => u.email?.toLowerCase() === email.toLowerCase());
-    
-    if (!user) {
+    if (authError) {
+      console.error('❌ Error fetching user by email:', authError);
       return res.status(404).json({ error: 'User not found with that email' });
     }
 
+    if (!authUser || !authUser.user) {
+      return res.status(404).json({ error: 'User not found with that email' });
+    }
+
+    const user = authUser.user;
     console.log(`✅ Found user: ${user.id} (${user.email})`);
 
     // 2. Find pending invitation for this email and contractor
@@ -3779,7 +3778,7 @@ app.post('/api/invitations/link-by-email', async (req, res) => {
       .from('contractor_client_invitations')
       .select('*')
       .eq('contractor_id', contractorId)
-      .eq('client_email', email)
+      .ilike('client_email', email) // Case insensitive match
       .eq('status', 'pending')
       .order('invited_at', { ascending: false })
       .limit(1)
@@ -3826,7 +3825,7 @@ app.post('/api/invitations/link-by-email', async (req, res) => {
         updated_at: new Date().toISOString()
       })
       .eq('contractor_id', contractorId)
-      .eq('email', email)
+      .ilike('email', email)
       .select()
       .single();
 
