@@ -3244,7 +3244,7 @@ app.post('/api/contractors/:contractorId/invitations', async (req, res) => {
       } else {
         try {
           const { data: emailData, error: emailError } = await resendClient.emails.send({
-            from: 'Dandee <onboarding@resend.dev>',
+            from: 'Dandee <support@dandeeapp.com>',
             to: [client_email],
             subject: `${contractor_name} invited you to join Dandee!`,
             html: `
@@ -3342,7 +3342,7 @@ app.patch('/api/invitations/:invitationId/resend', async (req, res) => {
         console.log(`📧 Sending resend email to: ${data.client_email}`);
         
         const { data: emailData, error: emailError } = await resendClient.emails.send({
-          from: 'Dandee <onboarding@resend.dev>',
+          from: 'Dandee <support@dandeeapp.com>',
           to: [data.client_email],
           subject: `Reminder: ${data.contractor_name || 'Your contractor'} invited you to join Dandee!`,
           html: `
