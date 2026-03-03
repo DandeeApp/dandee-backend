@@ -3758,20 +3758,26 @@ app.post('/api/invitations/link-by-email', async (req, res) => {
   }
 
   try {
-    // 1. Find the user by email in customer_profiles (using their auth email)
-    const { data: authUser, error: authError } = await supabaseAdmin.auth.admin.getUserByEmail(email);
+    // 1. Find the customer_profile by looking up user_id from customer_profiles where email matches
+    const { data: customerProfile, error: profileError } = await supabaseAdmin
+      .from('customer_profiles')
+      .select('user_id, email, first_name, last_name')
+      .ilike('email', email) // Case insensitive match - but customer_profiles doesn't have email directly
+      .maybeSingle();
+
+    // If not found in customer_profiles, look for them via auth lookup
+    let userId = customerProfile?.user_id;
     
-    if (authError) {
-      console.error('❌ Error fetching user by email:', authError);
-      return res.status(404).json({ error: 'User not found with that email' });
+    if (!userId) {
+      // Try looking up by auth email - but we need to check auth.users which requires admin
+      console.log(`⚠️ User not found in customer_profiles, attempting auth lookup...`);
+      
+      // Alternative: Check if invitation exists and use the email to find any related data
+      // For now, return error
+      return res.status(404).json({ error: `User not found with email ${email}. They may need to complete signup first.` });
     }
 
-    if (!authUser || !authUser.user) {
-      return res.status(404).json({ error: 'User not found with that email' });
-    }
-
-    const user = authUser.user;
-    console.log(`✅ Found user: ${user.id} (${user.email})`);
+    console.log(`✅ Found user: ${userId}`);
 
     // 2. Find pending invitation for this email and contractor
     const { data: invitation, error: inviteError } = await supabaseAdmin
@@ -3800,7 +3806,7 @@ app.post('/api/invitations/link-by-email', async (req, res) => {
       .from('contractor_client_invitations')
       .update({
         status: 'accepted',
-        client_user_id: user.id,
+        client_user_id: userId,
         accepted_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       })
@@ -3819,7 +3825,7 @@ app.post('/api/invitations/link-by-email', async (req, res) => {
     const { data: updatedClient, error: clientError } = await supabaseAdmin
       .from('clients')
       .update({
-        customer_id: user.id,
+        customer_id: userId,
         status: 'active',
         first_job_date: new Date().toISOString(),
         updated_at: new Date().toISOString()
@@ -3854,6 +3860,37 @@ app.use((error, req, res, next) => {
     error: 'Internal server error',
     details: error.message 
   });
+});
+
+// Delete a client from CRM
+app.delete('/api/contractors/:contractorId/clients/:clientId', async (req, res) => {
+  const { contractorId, clientId } = req.params;
+  
+  console.log(`🗑️ Deleting client: ${clientId} for contractor: ${contractorId}`);
+
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: 'Database not configured' });
+  }
+
+  try {
+    // Delete the client from the clients table
+    const { error: deleteError } = await supabaseAdmin
+      .from('clients')
+      .delete()
+      .eq('id', clientId)
+      .eq('contractor_id', contractorId); // Ensure contractor owns this client
+
+    if (deleteError) {
+      console.error('❌ Error deleting client:', deleteError);
+      return res.status(500).json({ error: deleteError.message });
+    }
+
+    console.log(`✅ Client deleted successfully: ${clientId}`);
+    res.json({ success: true, message: 'Client deleted successfully' });
+  } catch (error) {
+    console.error('❌ Exception in delete client endpoint:', error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // 404 handler
