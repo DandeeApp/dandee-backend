@@ -3441,6 +3441,53 @@ This invitation will expire in 30 days.`,
   }
 });
 
+// Accept an invitation (called when client signs up)
+app.post('/api/invitations/:invitationCode/accept', async (req, res) => {
+  const { invitationCode } = req.params;
+  const { client_user_id } = req.body;
+
+  console.log(`✅ Accepting invitation: ${invitationCode} for user: ${client_user_id}`);
+
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: 'Database not configured' });
+  }
+
+  if (!client_user_id) {
+    return res.status(400).json({ error: 'client_user_id is required' });
+  }
+
+  try {
+    // Update invitation to accepted status
+    const { data, error } = await supabaseAdmin
+      .from('contractor_client_invitations')
+      .update({
+        status: 'accepted',
+        client_user_id: client_user_id,
+        accepted_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .eq('invitation_code', invitationCode)
+      .eq('status', 'pending') // Only accept if still pending
+      .select()
+      .single();
+
+    if (error) {
+      console.error('❌ Error accepting invitation:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    if (!data) {
+      return res.status(404).json({ error: 'Invitation not found or already accepted' });
+    }
+
+    console.log(`✅ Invitation accepted: ${invitationCode}, trigger will create CRM entry`);
+    res.json(data);
+  } catch (error) {
+    console.error('❌ Exception in accept invitation endpoint:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Error handling middleware
 app.use((error, req, res, next) => {
   console.error('Unhandled error:', error);
