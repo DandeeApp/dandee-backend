@@ -3743,6 +3743,111 @@ app.get('/api/debug/invitations/:contractorId', async (req, res) => {
   }
 });
 
+// Manual fix: Link existing user to invitation by email
+app.post('/api/invitations/link-by-email', async (req, res) => {
+  const { email, contractorId } = req.body;
+  
+  console.log(`🔗 Manually linking user by email: ${email} to contractor: ${contractorId}`);
+
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: 'Database not configured' });
+  }
+
+  if (!email || !contractorId) {
+    return res.status(400).json({ error: 'Email and contractorId are required' });
+  }
+
+  try {
+    // 1. Find the user by email in auth.users
+    const { data: users, error: userError } = await supabaseAdmin.auth.admin.listUsers();
+    
+    if (userError) {
+      console.error('❌ Error fetching users:', userError);
+      return res.status(500).json({ error: userError.message });
+    }
+
+    const user = users.users.find(u => u.email?.toLowerCase() === email.toLowerCase());
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found with that email' });
+    }
+
+    console.log(`✅ Found user: ${user.id} (${user.email})`);
+
+    // 2. Find pending invitation for this email and contractor
+    const { data: invitation, error: inviteError } = await supabaseAdmin
+      .from('contractor_client_invitations')
+      .select('*')
+      .eq('contractor_id', contractorId)
+      .eq('client_email', email)
+      .eq('status', 'pending')
+      .order('invited_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (inviteError) {
+      console.error('❌ Error finding invitation:', inviteError);
+      return res.status(500).json({ error: inviteError.message });
+    }
+
+    if (!invitation) {
+      return res.status(404).json({ error: 'No pending invitation found for this email and contractor' });
+    }
+
+    console.log(`✅ Found pending invitation: ${invitation.invitation_code}`);
+
+    // 3. Accept the invitation
+    const { data: updatedInvitation, error: updateError } = await supabaseAdmin
+      .from('contractor_client_invitations')
+      .update({
+        status: 'accepted',
+        client_user_id: user.id,
+        accepted_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', invitation.id)
+      .select()
+      .single();
+
+    if (updateError) {
+      console.error('❌ Error accepting invitation:', updateError);
+      return res.status(500).json({ error: updateError.message });
+    }
+
+    console.log(`✅ Invitation accepted: ${invitation.invitation_code}`);
+
+    // 4. Update the client entry from "invited" to "active"
+    const { data: updatedClient, error: clientError } = await supabaseAdmin
+      .from('clients')
+      .update({
+        customer_id: user.id,
+        status: 'active',
+        first_job_date: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .eq('contractor_id', contractorId)
+      .eq('email', email)
+      .select()
+      .single();
+
+    if (clientError) {
+      console.warn('⚠️ Warning: Could not update client entry:', clientError);
+    } else {
+      console.log(`✅ Client entry updated to active: ${updatedClient.name}`);
+    }
+
+    res.json({
+      success: true,
+      invitation: updatedInvitation,
+      client: updatedClient,
+      message: `Successfully linked ${email} to contractor`
+    });
+  } catch (error) {
+    console.error('❌ Exception in link-by-email endpoint:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Error handling middleware
 app.use((error, req, res, next) => {
   console.error('Unhandled error:', error);
