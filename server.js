@@ -3209,8 +3209,9 @@ app.post('/api/contractors/:contractorId/invitations', async (req, res) => {
     }
 
     const invitationCode = codeData;
-    const frontendUrl = process.env.FRONTEND_URL || 'https://www.dandeeapp.com';
-    const invitationUrl = `${frontendUrl}/accept-invitation/${invitationCode}`;
+    // Link to download page with invitation code as parameter
+    // After installing the app, user can enter the code or it can be auto-filled
+    const invitationUrl = `https://www.dandeeapp.com/download?invite=${invitationCode}`;
 
     // Create invitation record
     const { data, error } = await supabaseAdmin
@@ -3259,13 +3260,16 @@ app.post('/api/contractors/:contractorId/invitations', async (req, res) => {
                 <div style="background-color: #f9fafb; padding: 30px; border-radius: 10px;">
                   <h2 style="color: #1f2937; margin-top: 0;">You've been invited to Dandee!</h2>
                   <p>Hi ${client_name},</p>
-                  <p><strong>${contractor_name}</strong> has invited you to join Dandee to make managing home services easier.</p>
+                  <p><strong>${contractor_name}</strong> has invited you to join Dandee, the easiest way to manage your home services.</p>
                   
                   <div style="margin: 30px 0; text-align: center;">
-                    <a href="${invitationUrl}" style="background-color: #4F46E5; color: white; padding: 14px 28px; text-decoration: none; border-radius: 6px; display: inline-block; font-weight: 600;">Accept Invitation</a>
+                    <a href="${invitationUrl}" style="background-color: #4F46E5; color: white; padding: 14px 28px; text-decoration: none; border-radius: 6px; display: inline-block; font-weight: 600;">Download Dandee & Accept Invitation</a>
                   </div>
                   
-                  <p style="color: #6b7280; font-size: 14px;">Or click this link:</p>
+                  <p style="color: #6b7280; font-size: 14px; margin-top: 20px;"><strong>Your invitation code:</strong> <span style="background-color: #e5e7eb; padding: 4px 8px; border-radius: 4px; font-family: monospace;">${invitationCode}</span></p>
+                  <p style="color: #6b7280; font-size: 14px;">After downloading the app, you can use this code to connect with ${contractor_name}.</p>
+                  
+                  <p style="color: #6b7280; font-size: 14px; margin-top: 20px;">Or click this link:</p>
                   <p style="word-break: break-all;"><a href="${invitationUrl}" style="color: #4F46E5; text-decoration: underline;">${invitationUrl}</a></p>
                   
                   <p style="color: #9ca3af; font-size: 12px; margin-top: 30px;">This invitation will expire in 30 days.</p>
@@ -3277,9 +3281,13 @@ app.post('/api/contractors/:contractorId/invitations', async (req, res) => {
 
 Hi ${client_name},
 
-${contractor_name} has invited you to join Dandee to make managing home services easier.
+${contractor_name} has invited you to join Dandee, the easiest way to manage your home services.
 
-Accept your invitation here: ${invitationUrl}
+Download the Dandee app and accept your invitation here: ${invitationUrl}
+
+Your invitation code: ${invitationCode}
+
+After downloading the app, you can use this code to connect with ${contractor_name}.
 
 This invitation will expire in 30 days.`,
           });
@@ -3383,13 +3391,16 @@ app.patch('/api/invitations/:invitationId/resend', async (req, res) => {
               <div style="background-color: #f9fafb; padding: 30px; border-radius: 10px;">
                 <h2 style="color: #1f2937; margin-top: 0;">Reminder: You've been invited to Dandee!</h2>
                 <p>Hi ${data.client_name},</p>
-                <p>This is a reminder that <strong>${data.contractor_name || 'your contractor'}</strong> has invited you to join Dandee to make managing home services easier.</p>
+                <p>This is a reminder that <strong>${data.contractor_name || 'your contractor'}</strong> has invited you to join Dandee, the easiest way to manage your home services.</p>
                 
                 <div style="margin: 30px 0; text-align: center;">
-                  <a href="${data.invitation_url}" style="background-color: #4F46E5; color: white; padding: 14px 28px; text-decoration: none; border-radius: 6px; display: inline-block; font-weight: 600;">Accept Invitation</a>
+                  <a href="${data.invitation_url}" style="background-color: #4F46E5; color: white; padding: 14px 28px; text-decoration: none; border-radius: 6px; display: inline-block; font-weight: 600;">Download Dandee & Accept Invitation</a>
                 </div>
                 
-                <p style="color: #6b7280; font-size: 14px;">Or click this link:</p>
+                <p style="color: #6b7280; font-size: 14px; margin-top: 20px;"><strong>Your invitation code:</strong> <span style="background-color: #e5e7eb; padding: 4px 8px; border-radius: 4px; font-family: monospace;">${data.invitation_code}</span></p>
+                <p style="color: #6b7280; font-size: 14px;">After downloading the app, you can use this code to connect with ${data.contractor_name || 'your contractor'}.</p>
+                
+                <p style="color: #6b7280; font-size: 14px; margin-top: 20px;">Or click this link:</p>
                 <p style="word-break: break-all;"><a href="${data.invitation_url}" style="color: #4F46E5; text-decoration: underline;">${data.invitation_url}</a></p>
                 
                 <p style="color: #9ca3af; font-size: 12px; margin-top: 30px;">This invitation will expire in 30 days.</p>
@@ -3401,9 +3412,13 @@ app.patch('/api/invitations/:invitationId/resend', async (req, res) => {
 
 Hi ${data.client_name},
 
-This is a reminder that ${data.contractor_name || 'your contractor'} has invited you to join Dandee to make managing home services easier.
+This is a reminder that ${data.contractor_name || 'your contractor'} has invited you to join Dandee, the easiest way to manage your home services.
 
-Accept your invitation here: ${data.invitation_url}
+Download the Dandee app and accept your invitation here: ${data.invitation_url}
+
+Your invitation code: ${data.invitation_code}
+
+After downloading the app, you can use this code to connect with ${data.contractor_name || 'your contractor'}.
 
 This invitation will expire in 30 days.`,
         });
