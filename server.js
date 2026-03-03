@@ -3209,7 +3209,8 @@ app.post('/api/contractors/:contractorId/invitations', async (req, res) => {
     }
 
     const invitationCode = codeData;
-    const invitationUrl = `https://dandee.app/accept-invitation/${invitationCode}`;
+    const frontendUrl = process.env.FRONTEND_URL || 'https://www.dandeeapp.com';
+    const invitationUrl = `${frontendUrl}/accept-invitation/${invitationCode}`;
 
     // Create invitation record
     const { data, error } = await supabaseAdmin
