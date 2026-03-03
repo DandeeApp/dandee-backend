@@ -3248,13 +3248,39 @@ app.post('/api/contractors/:contractorId/invitations', async (req, res) => {
             to: [client_email],
             subject: `${contractor_name} invited you to join Dandee!`,
             html: `
-              <h2>You've been invited to Dandee!</h2>
-              <p>Hi ${client_name},</p>
-              <p><strong>${contractor_name}</strong> has invited you to join Dandee to make managing home services easier.</p>
-              <p><a href="${invitationUrl}" style="background-color: #4F46E5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">Accept Invitation</a></p>
-              <p>Or copy this link: ${invitationUrl}</p>
-              <p>This invitation will expire in 30 days.</p>
+              <!DOCTYPE html>
+              <html>
+              <head>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              </head>
+              <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+                <div style="background-color: #f9fafb; padding: 30px; border-radius: 10px;">
+                  <h2 style="color: #1f2937; margin-top: 0;">You've been invited to Dandee!</h2>
+                  <p>Hi ${client_name},</p>
+                  <p><strong>${contractor_name}</strong> has invited you to join Dandee to make managing home services easier.</p>
+                  
+                  <div style="margin: 30px 0; text-align: center;">
+                    <a href="${invitationUrl}" style="background-color: #4F46E5; color: white; padding: 14px 28px; text-decoration: none; border-radius: 6px; display: inline-block; font-weight: 600;">Accept Invitation</a>
+                  </div>
+                  
+                  <p style="color: #6b7280; font-size: 14px;">Or click this link:</p>
+                  <p style="word-break: break-all;"><a href="${invitationUrl}" style="color: #4F46E5; text-decoration: underline;">${invitationUrl}</a></p>
+                  
+                  <p style="color: #9ca3af; font-size: 12px; margin-top: 30px;">This invitation will expire in 30 days.</p>
+                </div>
+              </body>
+              </html>
             `,
+            text: `You've been invited to Dandee!
+
+Hi ${client_name},
+
+${contractor_name} has invited you to join Dandee to make managing home services easier.
+
+Accept your invitation here: ${invitationUrl}
+
+This invitation will expire in 30 days.`,
           });
 
           if (emailError) {
@@ -3346,13 +3372,39 @@ app.patch('/api/invitations/:invitationId/resend', async (req, res) => {
           to: [data.client_email],
           subject: `Reminder: ${data.contractor_name || 'Your contractor'} invited you to join Dandee!`,
           html: `
-            <h2>Reminder: You've been invited to Dandee!</h2>
-            <p>Hi ${data.client_name},</p>
-            <p>This is a reminder that you have a pending invitation to join Dandee.</p>
-            <p><a href="${data.invitation_url}" style="background-color: #4F46E5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">Accept Invitation</a></p>
-            <p>Or copy this link: ${data.invitation_url}</p>
-            <p>This invitation will expire in 30 days.</p>
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <meta charset="utf-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            </head>
+            <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+              <div style="background-color: #f9fafb; padding: 30px; border-radius: 10px;">
+                <h2 style="color: #1f2937; margin-top: 0;">Reminder: You've been invited to Dandee!</h2>
+                <p>Hi ${data.client_name},</p>
+                <p>This is a reminder that <strong>${data.contractor_name || 'your contractor'}</strong> has invited you to join Dandee to make managing home services easier.</p>
+                
+                <div style="margin: 30px 0; text-align: center;">
+                  <a href="${data.invitation_url}" style="background-color: #4F46E5; color: white; padding: 14px 28px; text-decoration: none; border-radius: 6px; display: inline-block; font-weight: 600;">Accept Invitation</a>
+                </div>
+                
+                <p style="color: #6b7280; font-size: 14px;">Or click this link:</p>
+                <p style="word-break: break-all;"><a href="${data.invitation_url}" style="color: #4F46E5; text-decoration: underline;">${data.invitation_url}</a></p>
+                
+                <p style="color: #9ca3af; font-size: 12px; margin-top: 30px;">This invitation will expire in 30 days.</p>
+              </div>
+            </body>
+            </html>
           `,
+          text: `Reminder: You've been invited to Dandee!
+
+Hi ${data.client_name},
+
+This is a reminder that ${data.contractor_name || 'your contractor'} has invited you to join Dandee to make managing home services easier.
+
+Accept your invitation here: ${data.invitation_url}
+
+This invitation will expire in 30 days.`,
         });
 
         if (emailError) {
