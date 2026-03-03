@@ -70,7 +70,7 @@ let resendClient = null;
 if (process.env.RESEND_API_KEY) {
   try {
     resendClient = new Resend(process.env.RESEND_API_KEY);
-    console.log('✅ Resend email client initialized');
+    console.log('✅ Resend email client initialized successfully');
   } catch (err) {
     console.error('❌ Failed to initialize Resend:', err.message);
   }
