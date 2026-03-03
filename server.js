@@ -3560,59 +3560,121 @@ app.post('/api/contractors/:contractorId/migrate-crm', async (req, res) => {
       return res.status(500).json({ error: fetchError.message });
     }
 
-    if (!crmClients || crmClients.length === 0) {
-      console.log('ℹ️ No crm_clients found to migrate');
-      return res.json({ migrated: 0, message: 'No clients to migrate' });
+    console.log(`📊 Found ${crmClients?.length || 0} crm_clients entries`);
+
+    // Also check accepted invitations
+    const { data: acceptedInvitations, error: inviteError } = await supabaseAdmin
+      .from('contractor_client_invitations')
+      .select('*')
+      .eq('contractor_id', contractorId)
+      .eq('status', 'accepted');
+
+    if (inviteError) {
+      console.error('❌ Error fetching accepted invitations:', inviteError);
     }
 
-    console.log(`📊 Found ${crmClients.length} crm_clients to migrate`);
+    console.log(`📊 Found ${acceptedInvitations?.length || 0} accepted invitations`);
 
     let migratedCount = 0;
     let skippedCount = 0;
 
-    for (const crmClient of crmClients) {
-      // Check if already exists in clients table
-      const { data: existingClient } = await supabaseAdmin
-        .from('clients')
-        .select('id')
-        .eq('contractor_id', crmClient.contractor_id)
-        .eq('email', crmClient.email)
-        .maybeSingle();
+    // Migrate from crm_clients
+    if (crmClients && crmClients.length > 0) {
+      for (const crmClient of crmClients) {
+        // Check if already exists in clients table
+        const { data: existingClient } = await supabaseAdmin
+          .from('clients')
+          .select('id')
+          .eq('contractor_id', crmClient.contractor_id)
+          .eq('email', crmClient.email)
+          .maybeSingle();
 
-      if (existingClient) {
-        console.log(`⏭️ Skipping ${crmClient.name} - already exists in clients table`);
-        skippedCount++;
-        continue;
+        if (existingClient) {
+          console.log(`⏭️ Skipping ${crmClient.name} - already exists in clients table`);
+          skippedCount++;
+          continue;
+        }
+
+        // Insert into clients table
+        const { error: insertError } = await supabaseAdmin
+          .from('clients')
+          .insert({
+            contractor_id: crmClient.contractor_id,
+            customer_id: crmClient.customer_id,
+            name: crmClient.name,
+            email: crmClient.email,
+            phone: crmClient.phone,
+            address: crmClient.address,
+            city: crmClient.city,
+            state: crmClient.state,
+            zip_code: crmClient.zip_code,
+            source: crmClient.source || 'invitation',
+            status: crmClient.status || 'active',
+            notes: crmClient.notes,
+            total_jobs: 0,
+            total_spent: 0,
+            first_job_date: crmClient.created_at,
+            created_at: crmClient.created_at,
+            updated_at: crmClient.updated_at || new Date().toISOString(),
+          });
+
+        if (insertError) {
+          console.error(`❌ Error migrating ${crmClient.name}:`, insertError);
+        } else {
+          console.log(`✅ Migrated ${crmClient.name} to clients table`);
+          migratedCount++;
+        }
       }
+    }
 
-      // Insert into clients table
-      const { error: insertError } = await supabaseAdmin
-        .from('clients')
-        .insert({
-          contractor_id: crmClient.contractor_id,
-          customer_id: crmClient.customer_id,
-          name: crmClient.name,
-          email: crmClient.email,
-          phone: crmClient.phone,
-          address: crmClient.address,
-          city: crmClient.city,
-          state: crmClient.state,
-          zip_code: crmClient.zip_code,
-          source: crmClient.source || 'invitation',
-          status: crmClient.status || 'active',
-          notes: crmClient.notes,
-          total_jobs: 0,
-          total_spent: 0,
-          first_job_date: crmClient.created_at,
-          created_at: crmClient.created_at,
-          updated_at: crmClient.updated_at || new Date().toISOString(),
-        });
+    // Migrate from accepted invitations
+    if (acceptedInvitations && acceptedInvitations.length > 0) {
+      for (const invitation of acceptedInvitations) {
+        if (!invitation.client_user_id) {
+          console.log(`⏭️ Skipping invitation ${invitation.client_name} - no client_user_id`);
+          skippedCount++;
+          continue;
+        }
 
-      if (insertError) {
-        console.error(`❌ Error migrating ${crmClient.name}:`, insertError);
-      } else {
-        console.log(`✅ Migrated ${crmClient.name} to clients table`);
-        migratedCount++;
+        // Check if already exists in clients table
+        const { data: existingClient } = await supabaseAdmin
+          .from('clients')
+          .select('id')
+          .eq('contractor_id', invitation.contractor_id)
+          .eq('customer_id', invitation.client_user_id)
+          .maybeSingle();
+
+        if (existingClient) {
+          console.log(`⏭️ Skipping ${invitation.client_name} - already exists in clients table`);
+          skippedCount++;
+          continue;
+        }
+
+        // Insert into clients table
+        const { error: insertError } = await supabaseAdmin
+          .from('clients')
+          .insert({
+            contractor_id: invitation.contractor_id,
+            customer_id: invitation.client_user_id,
+            name: invitation.client_name,
+            email: invitation.client_email,
+            phone: invitation.client_phone,
+            source: 'invitation',
+            status: 'active',
+            notes: invitation.notes || 'Migrated from accepted invitation',
+            total_jobs: 0,
+            total_spent: 0,
+            first_job_date: invitation.accepted_at,
+            created_at: invitation.invited_at,
+            updated_at: invitation.accepted_at,
+          });
+
+        if (insertError) {
+          console.error(`❌ Error migrating invitation for ${invitation.client_name}:`, insertError);
+        } else {
+          console.log(`✅ Migrated ${invitation.client_name} from accepted invitation`);
+          migratedCount++;
+        }
       }
     }
 
@@ -3620,7 +3682,7 @@ app.post('/api/contractors/:contractorId/migrate-crm', async (req, res) => {
     res.json({ 
       migrated: migratedCount, 
       skipped: skippedCount,
-      total: crmClients.length,
+      total: (crmClients?.length || 0) + (acceptedInvitations?.length || 0),
       message: `Successfully migrated ${migratedCount} clients`
     });
   } catch (error) {
