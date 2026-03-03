@@ -3539,6 +3539,96 @@ app.post('/api/invitations/:invitationCode/accept', async (req, res) => {
   }
 });
 
+// Migrate existing CRM clients from crm_clients table to clients table
+app.post('/api/contractors/:contractorId/migrate-crm', async (req, res) => {
+  const { contractorId } = req.params;
+  console.log(`🔄 Migrating CRM data for contractor: ${contractorId}`);
+
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: 'Database not configured' });
+  }
+
+  try {
+    // Get all entries from crm_clients for this contractor
+    const { data: crmClients, error: fetchError } = await supabaseAdmin
+      .from('crm_clients')
+      .select('*')
+      .eq('contractor_id', contractorId);
+
+    if (fetchError) {
+      console.error('❌ Error fetching crm_clients:', fetchError);
+      return res.status(500).json({ error: fetchError.message });
+    }
+
+    if (!crmClients || crmClients.length === 0) {
+      console.log('ℹ️ No crm_clients found to migrate');
+      return res.json({ migrated: 0, message: 'No clients to migrate' });
+    }
+
+    console.log(`📊 Found ${crmClients.length} crm_clients to migrate`);
+
+    let migratedCount = 0;
+    let skippedCount = 0;
+
+    for (const crmClient of crmClients) {
+      // Check if already exists in clients table
+      const { data: existingClient } = await supabaseAdmin
+        .from('clients')
+        .select('id')
+        .eq('contractor_id', crmClient.contractor_id)
+        .eq('email', crmClient.email)
+        .maybeSingle();
+
+      if (existingClient) {
+        console.log(`⏭️ Skipping ${crmClient.name} - already exists in clients table`);
+        skippedCount++;
+        continue;
+      }
+
+      // Insert into clients table
+      const { error: insertError } = await supabaseAdmin
+        .from('clients')
+        .insert({
+          contractor_id: crmClient.contractor_id,
+          customer_id: crmClient.customer_id,
+          name: crmClient.name,
+          email: crmClient.email,
+          phone: crmClient.phone,
+          address: crmClient.address,
+          city: crmClient.city,
+          state: crmClient.state,
+          zip_code: crmClient.zip_code,
+          source: crmClient.source || 'invitation',
+          status: crmClient.status || 'active',
+          notes: crmClient.notes,
+          total_jobs: 0,
+          total_spent: 0,
+          first_job_date: crmClient.created_at,
+          created_at: crmClient.created_at,
+          updated_at: crmClient.updated_at || new Date().toISOString(),
+        });
+
+      if (insertError) {
+        console.error(`❌ Error migrating ${crmClient.name}:`, insertError);
+      } else {
+        console.log(`✅ Migrated ${crmClient.name} to clients table`);
+        migratedCount++;
+      }
+    }
+
+    console.log(`✅ Migration complete: ${migratedCount} migrated, ${skippedCount} skipped`);
+    res.json({ 
+      migrated: migratedCount, 
+      skipped: skippedCount,
+      total: crmClients.length,
+      message: `Successfully migrated ${migratedCount} clients`
+    });
+  } catch (error) {
+    console.error('❌ Exception in migration endpoint:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Error handling middleware
 app.use((error, req, res, next) => {
   console.error('Unhandled error:', error);
