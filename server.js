@@ -3683,10 +3683,62 @@ app.post('/api/contractors/:contractorId/migrate-crm', async (req, res) => {
       migrated: migratedCount, 
       skipped: skippedCount,
       total: (crmClients?.length || 0) + (acceptedInvitations?.length || 0),
+      crmClientsFound: crmClients?.length || 0,
+      acceptedInvitationsFound: acceptedInvitations?.length || 0,
       message: `Successfully migrated ${migratedCount} clients`
     });
   } catch (error) {
     console.error('❌ Exception in migration endpoint:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Diagnostic endpoint: Check invitation status
+app.get('/api/debug/invitations/:contractorId', async (req, res) => {
+  const { contractorId } = req.params;
+  
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: 'Database not configured' });
+  }
+
+  try {
+    const { data: invitations } = await supabaseAdmin
+      .from('contractor_client_invitations')
+      .select('*')
+      .eq('contractor_id', contractorId);
+
+    const { data: crmClients } = await supabaseAdmin
+      .from('crm_clients')
+      .select('*')
+      .eq('contractor_id', contractorId);
+
+    const { data: clients } = await supabaseAdmin
+      .from('clients')
+      .select('*')
+      .eq('contractor_id', contractorId);
+
+    res.json({
+      invitations: {
+        total: invitations?.length || 0,
+        pending: invitations?.filter(i => i.status === 'pending').length || 0,
+        accepted: invitations?.filter(i => i.status === 'accepted').length || 0,
+        cancelled: invitations?.filter(i => i.status === 'cancelled').length || 0,
+        expired: invitations?.filter(i => i.status === 'expired').length || 0,
+        list: invitations || []
+      },
+      crmClients: {
+        total: crmClients?.length || 0,
+        list: crmClients || []
+      },
+      clients: {
+        total: clients?.length || 0,
+        invited: clients?.filter(c => c.status === 'invited').length || 0,
+        active: clients?.filter(c => c.status === 'active').length || 0,
+        list: clients || []
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error in debug endpoint:', error);
     res.status(500).json({ error: error.message });
   }
 });
