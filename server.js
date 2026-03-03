@@ -3237,11 +3237,11 @@ app.post('/api/contractors/:contractorId/invitations', async (req, res) => {
 
     console.log(`✅ Invitation created: ${data.id}`);
 
-    // Create CRM entry immediately with "invited" status
+    // Create client entry immediately with "invited" status
     // This allows contractor to see invited clients before they accept
     try {
-      const { error: crmError } = await supabaseAdmin
-        .from('crm_clients')
+      const { error: clientError } = await supabaseAdmin
+        .from('clients')
         .insert({
           contractor_id: contractorId,
           name: client_name,
@@ -3249,18 +3249,19 @@ app.post('/api/contractors/:contractorId/invitations', async (req, res) => {
           phone: client_phone || null,
           status: 'invited', // Special status for pending invitations
           source: 'invitation',
-          invitation_id: data.id,
           notes: notes || 'Invited to join Dandee',
+          total_jobs: 0,
+          total_spent: 0,
         });
 
-      if (crmError) {
-        // Don't fail the invitation if CRM entry fails, just log it
-        console.warn('⚠️ Warning: Could not create CRM entry for invitation:', crmError);
+      if (clientError) {
+        // Don't fail the invitation if client entry fails, just log it
+        console.warn('⚠️ Warning: Could not create client entry for invitation:', clientError);
       } else {
-        console.log(`✅ CRM entry created for invited client: ${client_name}`);
+        console.log(`✅ Client entry created for invited client: ${client_name}`);
       }
-    } catch (crmError) {
-      console.warn('⚠️ Warning: Exception creating CRM entry:', crmError);
+    } catch (clientError) {
+      console.warn('⚠️ Warning: Exception creating client entry:', clientError);
     }
 
 
@@ -3509,25 +3510,26 @@ app.post('/api/invitations/:invitationCode/accept', async (req, res) => {
 
     console.log(`✅ Invitation accepted: ${invitationCode}`);
 
-    // Update the CRM entry from "invited" to "active" and link the customer_id
+    // Update the client entry from "invited" to "active" and link the customer_id
     try {
-      const { error: crmError } = await supabaseAdmin
-        .from('crm_clients')
+      const { error: clientError } = await supabaseAdmin
+        .from('clients')
         .update({
           customer_id: client_user_id,
           status: 'active',
+          first_job_date: new Date().toISOString(), // Set when they join
           updated_at: new Date().toISOString()
         })
-        .eq('invitation_id', data.id)
-        .eq('contractor_id', data.contractor_id);
+        .eq('contractor_id', data.contractor_id)
+        .eq('email', data.client_email); // Match by email since we don't have invitation_id in clients table
 
-      if (crmError) {
-        console.warn('⚠️ Warning: Could not update CRM entry:', crmError);
+      if (clientError) {
+        console.warn('⚠️ Warning: Could not update client entry:', clientError);
       } else {
-        console.log(`✅ CRM entry updated to active for user: ${client_user_id}`);
+        console.log(`✅ Client entry updated to active for user: ${client_user_id}`);
       }
-    } catch (crmError) {
-      console.warn('⚠️ Warning: Exception updating CRM entry:', crmError);
+    } catch (clientError) {
+      console.warn('⚠️ Warning: Exception updating client entry:', clientError);
     }
 
     res.json(data);
