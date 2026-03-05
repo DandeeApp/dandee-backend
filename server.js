@@ -1780,6 +1780,202 @@ app.get('/api/notifications/:userId', async (req, res) => {
   }
 });
 
+// Helper function to calculate distance between two coordinates (Haversine formula)
+const calculateDistance = (lat1, lon1, lat2, lon2) => {
+  const R = 3959; // Earth's radius in miles
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = 
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c; // Distance in miles
+};
+
+// NEW: Notify contractors within service radius about a new job request
+app.post('/api/notifications/notify-all-contractors', async (req, res) => {
+  if (!supabaseAdmin) {
+    return res.status(503).json({
+      error: 'Supabase admin client not configured',
+    });
+  }
+
+  try {
+    const { jobId, title, message, category, urgency, location, customerName, latitude, longitude } = req.body || {};
+
+    if (!jobId || !title || !message) {
+      return res.status(400).json({
+        error: 'Missing required fields: jobId, title, message',
+      });
+    }
+
+    console.log('📢 Notifying contractors within radius about new job request:', jobId);
+
+    // First, get the job location from the database if not provided
+    let jobLat = latitude;
+    let jobLon = longitude;
+    
+    if (!jobLat || !jobLon) {
+      console.log('📍 Job coordinates not provided, fetching from database...');
+      const { data: jobData, error: jobError } = await supabaseAdmin
+        .from('job_requests')
+        .select('latitude, longitude')
+        .eq('id', jobId)
+        .single();
+      
+      if (!jobError && jobData) {
+        jobLat = jobData.latitude;
+        jobLon = jobData.longitude;
+        console.log(`📍 Job location: ${jobLat}, ${jobLon}`);
+      }
+    }
+
+    // Fetch ALL contractors with their location and service radius
+    const { data: contractors, error: fetchError } = await supabaseAdmin
+      .from('contractor_profiles')
+      .select('user_id, latitude, longitude, service_radius, specialties, business_name');
+
+    if (fetchError) {
+      console.error('❌ Failed to fetch contractors:', fetchError);
+      return res.status(500).json({
+        error: 'Failed to fetch contractors',
+        details: fetchError.message,
+      });
+    }
+
+    if (!contractors || contractors.length === 0) {
+      console.log('ℹ️ No contractors found in database');
+      return res.json({
+        success: true,
+        notifiedCount: 0,
+        message: 'No contractors to notify',
+      });
+    }
+
+    console.log(`👥 Found ${contractors.length} total contractors`);
+
+    // Filter contractors by distance and service radius
+    const eligibleContractors = [];
+    
+    if (jobLat && jobLon) {
+      for (const contractor of contractors) {
+        // Skip contractors without location or service radius
+        if (!contractor.latitude || !contractor.longitude || !contractor.service_radius) {
+          console.log(`⚠️ Skipping contractor ${contractor.user_id}: missing location or service_radius`);
+          continue;
+        }
+
+        // Calculate distance from contractor to job
+        const distance = calculateDistance(
+          contractor.latitude,
+          contractor.longitude,
+          jobLat,
+          jobLon
+        );
+
+        console.log(`📏 Contractor ${contractor.business_name || contractor.user_id}: ${distance.toFixed(1)} miles away (radius: ${contractor.service_radius} miles)`);
+
+        // Check if job is within contractor's service radius
+        if (distance <= contractor.service_radius) {
+          eligibleContractors.push({
+            ...contractor,
+            distance: distance.toFixed(1),
+          });
+          console.log(`✅ Within radius - will notify`);
+        } else {
+          console.log(`❌ Outside radius - skipping`);
+        }
+      }
+    } else {
+      console.warn('⚠️ No job location available, notifying ALL contractors');
+      // If no job location, notify all contractors (fallback)
+      eligibleContractors.push(...contractors.map(c => ({ ...c, distance: 'unknown' })));
+    }
+
+    console.log(`👥 ${eligibleContractors.length} contractors within service radius`);
+
+    // Create notification for each contractor
+    const notificationsToInsert = contractors.map(contractor => ({
+      user_id: contractor.user_id,
+      type: 'job',
+      title,
+      message,
+      metadata: {
+        jobId,
+        category,
+        urgency,
+        location,
+        customerName,
+      },
+      action_url: `/contractor/jobs/${jobId}`,
+      read: false,
+    }));
+
+    // Bulk insert all notifications
+    const { data: insertedNotifications, error: insertError } = await supabaseAdmin
+      .from('notifications')
+      .insert(notificationsToInsert)
+      .select('user_id');
+
+    if (insertError) {
+      console.error('❌ Failed to insert notifications:', insertError);
+      return res.status(500).json({
+        error: 'Failed to create notifications',
+        details: insertError.message,
+      });
+    }
+
+    console.log(`✅ Created ${insertedNotifications?.length || 0} notifications`);
+
+    // Attempt to send push notifications to all contractors via OneSignal
+    let pushCount = 0;
+    if (oneSignalService.isConfigured()) {
+      console.log('📱 Sending OneSignal push notifications to all contractors...');
+      
+      for (const contractor of contractors) {
+        try {
+          const pushResult = await oneSignalService.sendToUser({
+            userId: contractor.user_id,
+            title,
+            body: message,
+            data: {
+              jobId,
+              category,
+              urgency,
+            },
+            url: `/contractor/jobs/${jobId}`,
+          });
+
+          if (pushResult.success) {
+            pushCount++;
+          }
+        } catch (pushError) {
+          console.error(`⚠️ Failed to send push to ${contractor.user_id}:`, pushError.message);
+          // Continue to next contractor
+        }
+      }
+
+      console.log(`📊 Sent ${pushCount}/${contractors.length} push notifications`);
+    } else {
+      console.warn('⚠️ OneSignal not configured, push notifications not sent');
+    }
+
+    res.json({
+      success: true,
+      notifiedCount: insertedNotifications?.length || 0,
+      pushSent: pushCount,
+      totalContractors: contractors.length,
+    });
+  } catch (error) {
+    console.error('❌ Unexpected error notifying contractors:', error);
+    res.status(500).json({
+      error: 'Unexpected error notifying contractors',
+      details: error.message,
+    });
+  }
+});
+
 app.post('/api/jobs/update-status', async (req, res) => {
   if (!supabaseAdmin) {
     return res.status(503).json({
