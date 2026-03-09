@@ -1895,8 +1895,19 @@ app.post('/api/notifications/notify-all-contractors', async (req, res) => {
 
     console.log(`👥 ${eligibleContractors.length} contractors within service radius`);
 
-    // Create notification for each contractor
-    const notificationsToInsert = contractors.map(contractor => ({
+    console.log(`👥 ${eligibleContractors.length} contractors within service radius`);
+
+    if (eligibleContractors.length === 0) {
+      console.log('ℹ️ No contractors within service radius');
+      return res.json({
+        success: true,
+        notifiedCount: 0,
+        message: 'No contractors within service radius',
+      });
+    }
+
+    // Create notification for each eligible contractor
+    const notificationsToInsert = eligibleContractors.map(contractor => ({
       user_id: contractor.user_id,
       type: 'job',
       title,
@@ -1907,6 +1918,7 @@ app.post('/api/notifications/notify-all-contractors', async (req, res) => {
         urgency,
         location,
         customerName,
+        distance: contractor.distance,
       },
       action_url: `/contractor/jobs/${jobId}`,
       read: false,
@@ -1928,21 +1940,22 @@ app.post('/api/notifications/notify-all-contractors', async (req, res) => {
 
     console.log(`✅ Created ${insertedNotifications?.length || 0} notifications`);
 
-    // Attempt to send push notifications to all contractors via OneSignal
+    // Attempt to send push notifications to eligible contractors via OneSignal
     let pushCount = 0;
     if (oneSignalService.isConfigured()) {
-      console.log('📱 Sending OneSignal push notifications to all contractors...');
+      console.log('📱 Sending OneSignal push notifications to eligible contractors...');
       
-      for (const contractor of contractors) {
+      for (const contractor of eligibleContractors) {
         try {
           const pushResult = await oneSignalService.sendToUser({
             userId: contractor.user_id,
             title,
-            body: message,
+            body: `${message} (${contractor.distance} miles away)`,
             data: {
               jobId,
               category,
               urgency,
+              distance: contractor.distance,
             },
             url: `/contractor/jobs/${jobId}`,
           });
@@ -1956,7 +1969,7 @@ app.post('/api/notifications/notify-all-contractors', async (req, res) => {
         }
       }
 
-      console.log(`📊 Sent ${pushCount}/${contractors.length} push notifications`);
+      console.log(`📊 Sent ${pushCount}/${eligibleContractors.length} push notifications`);
     } else {
       console.warn('⚠️ OneSignal not configured, push notifications not sent');
     }
@@ -1966,6 +1979,8 @@ app.post('/api/notifications/notify-all-contractors', async (req, res) => {
       notifiedCount: insertedNotifications?.length || 0,
       pushSent: pushCount,
       totalContractors: contractors.length,
+      eligibleContractors: eligibleContractors.length,
+      jobLocation: jobLat && jobLon ? { latitude: jobLat, longitude: jobLon } : null,
     });
   } catch (error) {
     console.error('❌ Unexpected error notifying contractors:', error);

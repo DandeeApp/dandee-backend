@@ -45,15 +45,15 @@ class OneSignalPushService {
         include_external_user_ids: [userId],
         headings: { en: title },
         contents: { en: body },
-        data: data || {},
+        data: {
+          ...(data || {}),
+          // Include action_url in data payload for app to handle navigation
+          action_url: url || '',
+        },
       };
 
-      // Add deep link URL if provided
-      if (url) {
-        payload.url = url;
-        payload.web_url = url;
-        payload.app_url = url;
-      }
+      // For mobile apps, don't use url/web_url/app_url - handle navigation in the app via data payload
+      // The app will read data.action_url and navigate accordingly
 
       console.log(`📱 Sending OneSignal notification to user: ${userId}`);
       
@@ -111,14 +111,14 @@ class OneSignalPushService {
         include_external_user_ids: userIds,
         headings: { en: title },
         contents: { en: body },
-        data: data || {},
+        data: {
+          ...(data || {}),
+          // Include action_url in data payload for app to handle navigation
+          action_url: url || '',
+        },
       };
 
-      if (url) {
-        payload.url = url;
-        payload.web_url = url;
-        payload.app_url = url;
-      }
+      // For mobile apps, don't use url/web_url/app_url - handle navigation in the app via data payload
 
       console.log(`📱 Sending OneSignal notification to ${userIds.length} users`);
       
