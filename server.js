@@ -1647,7 +1647,7 @@ app.post('/api/notifications/send', async (req, res) => {
     let pushResult = null;
     if (sendPush) {
       try {
-        // NEW: Use OneSignal for push notifications
+        // Use OneSignal for push notifications (handles APNs/FCM for us)
         if (oneSignalService.isConfigured()) {
           console.log(`📱 Sending OneSignal push to user: ${userId}`);
           
@@ -1676,45 +1676,7 @@ app.post('/api/notifications/send', async (req, res) => {
           }
         } else {
           console.warn('⚠️ OneSignal not configured (missing ONESIGNAL_REST_API_KEY)');
-          
-          // FALLBACK: Try Firebase/APNs method (legacy)
-          // Get user's device tokens
-          const { data: tokens, error: tokenError } = await supabaseAdmin
-            .from('push_tokens')
-            .select('device_token, platform')
-            .eq('user_id', userId)
-            .eq('is_active', true);
-
-          if (!tokenError && tokens && tokens.length > 0) {
-            console.log(`📱 Sending push to ${tokens.length} device(s) for user ${userId}`);
-            
-            // Send push to all active devices
-            const pushPromises = tokens.map(({ device_token, platform }) =>
-              pushService.sendPushNotification({
-                deviceToken: device_token,
-                platform,
-                title,
-                body: message,
-                data: data || {},
-                sound: 'default',
-                badge: 1,
-              })
-            );
-
-            const pushResults = await Promise.allSettled(pushPromises);
-            const successful = pushResults.filter(r => r.status === 'fulfilled' && r.value.success).length;
-            
-            pushResult = {
-              provider: 'firebase',
-              sent: successful,
-              total: tokens.length,
-              failed: tokens.length - successful,
-            };
-
-            console.log(`📊 Push results: ${successful}/${tokens.length} sent successfully`);
-          } else {
-            console.log(`⚠️ No active push tokens found for user ${userId}`);
-          }
+          console.warn('⚠️ Push notifications will not be sent (no push service configured)');
         }
       } catch (pushError) {
         console.error('❌ Error sending push notification:', pushError);
@@ -4103,6 +4065,466 @@ app.delete('/api/contractors/:contractorId/clients/:clientId', async (req, res) 
     res.status(500).json({ error: error.message });
   }
 });
+
+// ============================================================
+// ADMIN: Re-engagement drip for unconverted contractors
+// ============================================================
+
+function buildReEngagementEmail(touch, firstName) {
+  const name = firstName || 'there';
+  const appUrl = 'https://dandeeapp.com';
+
+  const headerHtml = `
+    <div style="background: linear-gradient(135deg, #4F46E5 0%, #7C3AED 100%); padding: 36px 30px; text-align: center; border-radius: 10px 10px 0 0;">
+      <h1 style="color: white; margin: 0; font-size: 26px; font-weight: 700; letter-spacing: -0.5px;">Dandee</h1>
+      <p style="color: rgba(255,255,255,0.8); margin: 6px 0 0; font-size: 13px;">Built for Contractors</p>
+    </div>`;
+
+  const footerHtml = `
+    <div style="background: #f9fafb; padding: 20px 30px; border-radius: 0 0 10px 10px; border-top: 1px solid #e5e7eb; text-align: center;">
+      <p style="color: #9ca3af; font-size: 12px; margin: 0;">Dandee &middot; <a href="mailto:support@dandeeapp.com" style="color: #6b7280; text-decoration: none;">support@dandeeapp.com</a></p>
+      <p style="color: #9ca3af; font-size: 11px; margin: 8px 0 0;">You're receiving this because you created a Dandee contractor account.</p>
+    </div>`;
+
+  const ctaButton = (label) =>
+    `<div style="text-align: center; margin: 32px 0;">
+      <a href="${appUrl}" style="background: #4F46E5; color: white; padding: 16px 36px; text-decoration: none; border-radius: 8px; display: inline-block; font-weight: 600; font-size: 16px;">${label}</a>
+    </div>`;
+
+  const wrapHtml = (body) =>
+    `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #1f2937; max-width: 600px; margin: 0 auto; padding: 20px; background: #f3f4f6;">
+  <div style="background: white; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.07);">
+    ${headerHtml}
+    <div style="padding: 40px 30px;">
+      ${body}
+    </div>
+    ${footerHtml}
+  </div>
+</body></html>`;
+
+  if (touch === 1) {
+    return {
+      subject: `Hi ${name}, your Dandee profile is almost ready`,
+      html: wrapHtml(`
+        <h2 style="margin: 0 0 16px; font-size: 22px;">You're almost there, ${name}</h2>
+        <p style="color: #4b5563; margin: 0 0 20px;">You created your Dandee account but haven't finished setting up your contractor profile. It only takes about 3 minutes — and once you're live, homeowners in your area can start finding you.</p>
+        <div style="background: #f5f3ff; border-radius: 8px; padding: 20px; margin: 24px 0;">
+          <p style="margin: 0 0 12px; font-weight: 600; color: #1f2937;">What you'll unlock:</p>
+          <ul style="margin: 0; padding-left: 20px; color: #4b5563;">
+            <li style="margin-bottom: 8px;">Get matched with homeowners near you automatically</li>
+            <li style="margin-bottom: 8px;">Send professional quotes and invoices in seconds</li>
+            <li style="margin-bottom: 8px;">Get paid directly through the app</li>
+            <li>30-day free trial &mdash; no credit card needed to start</li>
+          </ul>
+        </div>
+        ${ctaButton('Complete My Profile &rarr;')}
+        <p style="color: #6b7280; font-size: 14px; margin: 0;">Questions? Just reply to this email.</p>`),
+      text: `Hi ${name},\n\nYou created your Dandee account but haven't finished your contractor profile. It only takes about 3 minutes.\n\nComplete your profile: ${appUrl}\n\nWhat you'll unlock:\n- Get matched with homeowners near you automatically\n- Send professional quotes and invoices in seconds\n- Get paid directly through the app\n- 30-day free trial, no credit card needed\n\nQuestions? Reply to this email.\n\nThanks,\nThe Dandee Team`,
+    };
+  }
+
+  if (touch === 2) {
+    return {
+      subject: 'Contractors near you are winning jobs on Dandee',
+      html: wrapHtml(`
+        <h2 style="margin: 0 0 16px; font-size: 22px;">Don't let others take your jobs, ${name}</h2>
+        <p style="color: #4b5563; margin: 0 0 20px;">Contractors in your area are already getting matched with homeowners on Dandee. Your profile isn't live yet — which means those jobs are going to someone else.</p>
+        <div style="border-left: 4px solid #4F46E5; padding: 16px 20px; background: #f5f3ff; border-radius: 0 8px 8px 0; margin: 24px 0;">
+          <p style="margin: 0; color: #4b5563; font-style: italic;">"I booked 3 new clients in my first week. The job matching only shows me work I actually want — no more wasted bids."</p>
+          <p style="margin: 10px 0 0; color: #6b7280; font-size: 13px; font-weight: 600;">&mdash; Dandee contractor</p>
+        </div>
+        <p style="color: #4b5563;">Finish your profile in 3 minutes. Your first 30 days are completely free &mdash; no credit card required.</p>
+        ${ctaButton('Finish My Profile &rarr;')}
+        <p style="color: #6b7280; font-size: 14px; margin: 0;">Need help? Reply to this email and we'll walk you through it.</p>`),
+      text: `Hi ${name},\n\nContractors in your area are already getting matched with homeowners on Dandee. Your profile isn't live yet — those jobs are going to someone else.\n\nFinish your profile: ${appUrl}\n\nYour first 30 days are completely free, no credit card required.\n\nNeed help? Reply to this email.\n\nThanks,\nThe Dandee Team`,
+    };
+  }
+
+  // touch === 3
+  return {
+    subject: `${name}, your 30-day free trial is still here`,
+    html: wrapHtml(`
+      <h2 style="margin: 0 0 16px; font-size: 22px;">Your free trial is still waiting, ${name}</h2>
+      <p style="color: #4b5563; margin: 0 0 20px;">We want to make sure you don't miss out. Your Dandee contractor account is ready — we just need a few more details to get your profile live.</p>
+      <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 20px; margin: 24px 0;">
+        <p style="margin: 0 0 8px; font-weight: 600; color: #166534;">Your free trial includes:</p>
+        <ul style="margin: 0; padding-left: 20px; color: #15803d;">
+          <li style="margin-bottom: 6px;">Unlimited job matches for 30 days</li>
+          <li style="margin-bottom: 6px;">White-label quotes &amp; invoices</li>
+          <li style="margin-bottom: 6px;">Built-in payment processing</li>
+          <li>CRM, calendar sync, and analytics</li>
+        </ul>
+        <p style="margin: 12px 0 0; color: #166534; font-size: 13px; font-weight: 600;">After 30 days: $29.99/month. Cancel anytime.</p>
+      </div>
+      ${ctaButton('Start My Free Trial &rarr;')}
+      <p style="color: #6b7280; font-size: 14px; margin: 0;">This is our last reminder. If now isn't the right time, no worries — your account will be here when you're ready.</p>`),
+    text: `Hi ${name},\n\nYour Dandee free trial is still waiting. We just need a few more details to get your profile live.\n\nYour free trial includes:\n- Unlimited job matches for 30 days\n- White-label quotes & invoices\n- Built-in payment processing\n- CRM, calendar sync, and analytics\n\nAfter 30 days: $29.99/month. Cancel anytime.\n\nStart your free trial: ${appUrl}\n\nThanks,\nThe Dandee Team`,
+  };
+}
+
+// GET /api/admin/contractors/unconverted
+// Returns all contractors who signed up but haven't completed onboarding
+app.get('/api/admin/contractors/unconverted', async (req, res) => {
+  if (!supabaseAdmin) {
+    return res.status(503).json({ error: 'Supabase admin client not configured' });
+  }
+
+  try {
+    const { data: { users }, error } = await supabaseAdmin.auth.admin.listUsers({ perPage: 1000 });
+
+    if (error) {
+      console.error('❌ Error listing users:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    const unconverted = users.filter(
+      (u) =>
+        u.user_metadata?.user_type === 'contractor' &&
+        u.user_metadata?.onboarding_completed !== true &&
+        u.user_metadata?.onboarding_completed !== 'true'
+    );
+
+    const userIds = unconverted.map((u) => u.id);
+
+    let profileMap = {};
+    if (userIds.length > 0) {
+      const { data: profiles } = await supabaseAdmin
+        .from('contractor_profiles')
+        .select('user_id, first_name, last_name, business_name, business_email, created_at')
+        .in('user_id', userIds);
+      (profiles || []).forEach((p) => (profileMap[p.user_id] = p));
+    }
+
+    const now = Date.now();
+    const result = unconverted.map((u) => {
+      const profile = profileMap[u.id] || {};
+      const daysSinceSignup = Math.floor((now - new Date(u.created_at).getTime()) / (1000 * 60 * 60 * 24));
+      return {
+        id: u.id,
+        email: u.email,
+        first_name: profile.first_name || u.user_metadata?.name || null,
+        business_name: profile.business_name || null,
+        business_email: profile.business_email || null,
+        signed_up_at: u.created_at,
+        days_since_signup: daysSinceSignup,
+        has_partial_profile: !!profileMap[u.id],
+      };
+    });
+
+    result.sort((a, b) => a.days_since_signup - b.days_since_signup);
+
+    res.json({ count: result.length, contractors: result });
+  } catch (error) {
+    console.error('❌ Exception in unconverted contractors endpoint:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/re-engagement/run
+// Sends re-engagement emails + push notifications to unconverted contractors.
+// Selects the right touch (1, 2, or 3) based on days since signup.
+// Skips anyone already contacted in the last 3 days for that touch.
+// Pass { dryRun: true } to preview without sending.
+// Pass { userId: '...' } to target a single contractor for testing.
+app.post('/api/admin/re-engagement/run', async (req, res) => {
+  if (!supabaseAdmin) {
+    return res.status(503).json({ error: 'Supabase admin client not configured' });
+  }
+
+  const { dryRun = false, userId: targetUserId } = req.body || {};
+
+  try {
+    // 1. Get all contractor users
+    const { data: { users }, error: usersError } = await supabaseAdmin.auth.admin.listUsers({ perPage: 1000 });
+    if (usersError) return res.status(500).json({ error: usersError.message });
+
+    let candidates = users.filter(
+      (u) =>
+        u.user_metadata?.user_type === 'contractor' &&
+        u.user_metadata?.onboarding_completed !== true &&
+        u.user_metadata?.onboarding_completed !== 'true'
+    );
+
+    if (targetUserId) {
+      candidates = candidates.filter((u) => u.id === targetUserId);
+    }
+
+    if (candidates.length === 0) {
+      return res.json({ sent: 0, skipped: 0, message: 'No unconverted contractors found.' });
+    }
+
+    // 2. Get partial profiles for names / business emails
+    const candidateIds = candidates.map((u) => u.id);
+    const { data: profiles } = await supabaseAdmin
+      .from('contractor_profiles')
+      .select('user_id, first_name, business_email')
+      .in('user_id', candidateIds);
+    const profileMap = {};
+    (profiles || []).forEach((p) => (profileMap[p.user_id] = p));
+
+    // 3. Check which re-engagement notifications have already been sent
+    const { data: sentNotifs } = await supabaseAdmin
+      .from('notifications')
+      .select('user_id, metadata, created_at')
+      .in('user_id', candidateIds)
+      .eq('type', 'system')
+      .filter('metadata->>re_engagement', 'eq', 'true');
+
+    // Build a set: `${userId}:${touch}` for quick lookup
+    const alreadySent = new Set();
+    (sentNotifs || []).forEach((n) => {
+      const touch = n.metadata?.touch;
+      const sentAt = new Date(n.created_at).getTime();
+      const threeDaysAgo = Date.now() - 3 * 24 * 60 * 60 * 1000;
+      if (touch && sentAt > threeDaysAgo) {
+        alreadySent.add(`${n.user_id}:${touch}`);
+      }
+    });
+
+    const now = Date.now();
+    const results = { sent: 0, skipped: 0, dryRun, details: [] };
+
+    for (const user of candidates) {
+      const profile = profileMap[user.id] || {};
+      const daysSinceSignup = Math.floor((now - new Date(user.created_at).getTime()) / (1000 * 60 * 60 * 24));
+
+      // Determine which touch to send
+      let touch = null;
+      if (daysSinceSignup >= 1 && daysSinceSignup <= 2) touch = 1;
+      else if (daysSinceSignup >= 3 && daysSinceSignup <= 6) touch = 2;
+      else if (daysSinceSignup >= 7 && daysSinceSignup <= 30) touch = 3;
+
+      if (!touch) {
+        results.skipped++;
+        results.details.push({ userId: user.id, reason: `days_since_signup=${daysSinceSignup} outside drip window` });
+        continue;
+      }
+
+      if (alreadySent.has(`${user.id}:${touch}`)) {
+        results.skipped++;
+        results.details.push({ userId: user.id, reason: `touch ${touch} already sent within 3 days` });
+        continue;
+      }
+
+      const emailAddress = profile.business_email || user.email;
+      const firstName = profile.first_name || user.user_metadata?.name || null;
+      const template = buildReEngagementEmail(touch, firstName);
+
+      if (dryRun) {
+        results.sent++;
+        results.details.push({
+          userId: user.id,
+          email: emailAddress,
+          touch,
+          subject: template.subject,
+          daysSinceSignup,
+          dryRun: true,
+        });
+        continue;
+      }
+
+      // 4a. Send email via Resend
+      let emailSent = false;
+      if (resendClient && emailAddress) {
+        try {
+          const { error: emailError } = await resendClient.emails.send({
+            from: 'Dandee <support@dandeeapp.com>',
+            to: [emailAddress],
+            subject: template.subject,
+            html: template.html,
+            text: template.text,
+          });
+          if (emailError) {
+            console.error(`❌ Re-engagement email failed for ${user.id}:`, emailError);
+          } else {
+            emailSent = true;
+            console.log(`📧 Re-engagement touch ${touch} email sent to ${emailAddress}`);
+          }
+        } catch (e) {
+          console.error(`❌ Exception sending re-engagement email for ${user.id}:`, e.message);
+        }
+      }
+
+      // 4b. Send push notification via OneSignal
+      let pushSent = false;
+      const pushMessages = {
+        1: { title: 'Your profile is almost ready', body: 'Finish setup and start getting matched with homeowners near you.' },
+        2: { title: 'Jobs are waiting for you', body: 'Contractors near you are booking jobs on Dandee. Finish your profile today.' },
+        3: { title: 'Your free trial is still here', body: 'Complete your profile and start your 30-day free trial — no credit card needed.' },
+      };
+      if (oneSignalService.isConfigured()) {
+        const pushMsg = pushMessages[touch];
+        const pushResult = await oneSignalService.sendToUser({
+          userId: user.id,
+          title: pushMsg.title,
+          body: pushMsg.body,
+          data: { re_engagement: true, touch },
+          url: '/onboarding',
+        });
+        pushSent = pushResult.success;
+        if (!pushResult.success) {
+          console.warn(`⚠️  Push failed for ${user.id}:`, pushResult.error);
+        }
+      }
+
+      // 4c. Log to notifications table so we don't double-send
+      if (emailSent || pushSent) {
+        await supabaseAdmin.from('notifications').insert({
+          user_id: user.id,
+          type: 'system',
+          title: `Re-engagement touch ${touch}`,
+          message: template.subject,
+          metadata: { re_engagement: 'true', touch, email_sent: emailSent, push_sent: pushSent },
+        });
+
+        results.sent++;
+        results.details.push({
+          userId: user.id,
+          email: emailAddress,
+          touch,
+          subject: template.subject,
+          daysSinceSignup,
+          emailSent,
+          pushSent,
+        });
+      } else {
+        results.skipped++;
+        results.details.push({ userId: user.id, reason: 'email and push both unavailable or failed' });
+      }
+    }
+
+    console.log(`✅ Re-engagement run complete: ${results.sent} sent, ${results.skipped} skipped`);
+    res.json(results);
+  } catch (error) {
+    console.error('❌ Exception in re-engagement run:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Daily cron: automatically run the re-engagement drip
+// Fires once per day. Safe to call multiple times — throttling prevents double-sends.
+const RE_ENGAGEMENT_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+async function runDailyReEngagement() {
+  if (!supabaseAdmin || !resendClient) {
+    console.log('⏭️  Re-engagement cron: skipping — Supabase or Resend not configured');
+    return;
+  }
+  console.log('⏰ Re-engagement cron: running daily drip...');
+  try {
+    // Reuse the run logic by making an internal call
+    const { data: { users }, error } = await supabaseAdmin.auth.admin.listUsers({ perPage: 1000 });
+    if (error) { console.error('❌ Re-engagement cron: failed to list users:', error); return; }
+
+    const unconverted = users.filter(
+      (u) =>
+        u.user_metadata?.user_type === 'contractor' &&
+        u.user_metadata?.onboarding_completed !== true &&
+        u.user_metadata?.onboarding_completed !== 'true'
+    );
+
+    if (unconverted.length === 0) {
+      console.log('✅ Re-engagement cron: no unconverted contractors');
+      return;
+    }
+
+    const candidateIds = unconverted.map((u) => u.id);
+    const { data: profiles } = await supabaseAdmin
+      .from('contractor_profiles')
+      .select('user_id, first_name, business_email')
+      .in('user_id', candidateIds);
+    const profileMap = {};
+    (profiles || []).forEach((p) => (profileMap[p.user_id] = p));
+
+    const { data: sentNotifs } = await supabaseAdmin
+      .from('notifications')
+      .select('user_id, metadata, created_at')
+      .in('user_id', candidateIds)
+      .eq('type', 'system')
+      .filter('metadata->>re_engagement', 'eq', 'true');
+
+    const alreadySent = new Set();
+    (sentNotifs || []).forEach((n) => {
+      const touch = n.metadata?.touch;
+      const sentAt = new Date(n.created_at).getTime();
+      if (touch && sentAt > Date.now() - 3 * 24 * 60 * 60 * 1000) {
+        alreadySent.add(`${n.user_id}:${touch}`);
+      }
+    });
+
+    const pushMessages = {
+      1: { title: 'Your profile is almost ready', body: 'Finish setup and start getting matched with homeowners near you.' },
+      2: { title: 'Jobs are waiting for you', body: 'Contractors near you are booking jobs on Dandee. Finish your profile today.' },
+      3: { title: 'Your free trial is still here', body: 'Complete your profile and start your 30-day free trial — no credit card needed.' },
+    };
+
+    let sent = 0;
+    let skipped = 0;
+    const now = Date.now();
+
+    for (const user of unconverted) {
+      const profile = profileMap[user.id] || {};
+      const daysSinceSignup = Math.floor((now - new Date(user.created_at).getTime()) / (1000 * 60 * 60 * 24));
+
+      let touch = null;
+      if (daysSinceSignup >= 1 && daysSinceSignup <= 2) touch = 1;
+      else if (daysSinceSignup >= 3 && daysSinceSignup <= 6) touch = 2;
+      else if (daysSinceSignup >= 7 && daysSinceSignup <= 30) touch = 3;
+
+      if (!touch || alreadySent.has(`${user.id}:${touch}`)) { skipped++; continue; }
+
+      const emailAddress = profile.business_email || user.email;
+      const template = buildReEngagementEmail(touch, profile.first_name || user.user_metadata?.name);
+
+      let emailSent = false;
+      if (resendClient && emailAddress) {
+        try {
+          const { error: emailError } = await resendClient.emails.send({
+            from: 'Dandee <support@dandeeapp.com>',
+            to: [emailAddress],
+            subject: template.subject,
+            html: template.html,
+            text: template.text,
+          });
+          if (!emailError) emailSent = true;
+        } catch (e) {
+          console.error(`❌ Cron email error for ${user.id}:`, e.message);
+        }
+      }
+
+      let pushSent = false;
+      if (oneSignalService.isConfigured() && pushMessages[touch]) {
+        const p = pushMessages[touch];
+        const r = await oneSignalService.sendToUser({ userId: user.id, title: p.title, body: p.body, data: { re_engagement: true, touch }, url: '/onboarding' });
+        pushSent = r.success;
+      }
+
+      if (emailSent || pushSent) {
+        await supabaseAdmin.from('notifications').insert({
+          user_id: user.id,
+          type: 'system',
+          title: `Re-engagement touch ${touch}`,
+          message: template.subject,
+          metadata: { re_engagement: 'true', touch, email_sent: emailSent, push_sent: pushSent },
+        });
+        sent++;
+      } else {
+        skipped++;
+      }
+    }
+
+    console.log(`✅ Re-engagement cron complete: ${sent} sent, ${skipped} skipped`);
+  } catch (err) {
+    console.error('❌ Re-engagement cron error:', err);
+  }
+}
+
+// Start the daily cron — first run after 1 minute, then every 24 hours
+setTimeout(() => {
+  runDailyReEngagement();
+  setInterval(runDailyReEngagement, RE_ENGAGEMENT_INTERVAL_MS);
+}, 60 * 1000);
 
 // 404 handler
 app.use('*', (req, res) => {
