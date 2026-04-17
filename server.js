@@ -45,7 +45,15 @@ console.log(`🔌 Will listen on port: ${PORT}`);
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+// Stripe webhooks need the raw body for signature verification;
+// every other route gets the normal JSON parser.
+app.use((req, res, next) => {
+  if (req.originalUrl === '/api/webhooks/stripe') {
+    express.raw({ type: 'application/json' })(req, res, next);
+  } else {
+    express.json({ limit: '10mb' })(req, res, next);
+  }
+});
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
 // Initialize Stripe with your secret key
@@ -64,6 +72,109 @@ try {
 } catch (err) {
   console.error('❌ Failed to initialize Stripe:', err.message);
 }
+
+// ============================================
+// PLATFORM FEE — single source of truth
+// Keep in sync with homeops-hub-connect/src/config/fees.ts
+// ============================================
+const PLATFORM_FEE_RATE = 0.029;       // 2.9%
+const PLATFORM_FEE_FIXED_CENTS = 30;   // $0.30
+
+function calculatePlatformFee(amountDollars) {
+  const amountCents = Math.round(amountDollars * 100);
+  const feeCents = Math.round(amountCents * PLATFORM_FEE_RATE) + PLATFORM_FEE_FIXED_CENTS;
+  return feeCents / 100;
+}
+
+// ============================================
+// APP_URL fallback for Stripe Connect return URLs
+// ============================================
+const APP_URL = process.env.APP_URL || 'https://dandee.app';
+
+// ============================================
+// STRIPE WEBHOOK
+// ============================================
+app.post('/api/webhooks/stripe', async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  if (!webhookSecret) {
+    console.error('STRIPE_WEBHOOK_SECRET not configured — webhook ignored');
+    return res.status(500).send('Webhook secret not configured');
+  }
+  if (!stripeClient) {
+    return res.status(503).send('Stripe not initialized');
+  }
+
+  let event;
+  try {
+    event = stripeClient.webhooks.constructEvent(req.body, sig, webhookSecret);
+  } catch (err) {
+    console.error('Webhook signature verification failed:', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  try {
+    switch (event.type) {
+      // --- Payment lifecycle ---
+      case 'payment_intent.succeeded': {
+        const pi = event.data.object;
+        if (supabaseAdmin) {
+          await supabaseAdmin
+            .from('payments')
+            .update({ status: 'succeeded', payment_date: new Date().toISOString() })
+            .eq('stripe_payment_intent_id', pi.id);
+        }
+        break;
+      }
+      case 'payment_intent.payment_failed': {
+        const pi = event.data.object;
+        if (supabaseAdmin) {
+          await supabaseAdmin
+            .from('payments')
+            .update({ status: 'failed' })
+            .eq('stripe_payment_intent_id', pi.id);
+        }
+        break;
+      }
+
+      // --- Transfer lifecycle ---
+      case 'transfer.failed': {
+        const transfer = event.data.object;
+        console.error('TRANSFER FAILED:', transfer.id, 'destination:', transfer.destination);
+        break;
+      }
+
+      // --- Payout lifecycle (fires on Connected accounts) ---
+      case 'payout.paid': {
+        const payout = event.data.object;
+        if (supabaseAdmin) {
+          await supabaseAdmin
+            .from('payments')
+            .update({ status: 'completed', payment_date: new Date().toISOString() })
+            .eq('stripe_payout_id', payout.id);
+        }
+        break;
+      }
+      case 'payout.failed': {
+        const payout = event.data.object;
+        console.error('PAYOUT FAILED:', payout.id, payout.failure_message);
+        if (supabaseAdmin) {
+          await supabaseAdmin
+            .from('payments')
+            .update({ status: 'failed' })
+            .eq('stripe_payout_id', payout.id);
+        }
+        break;
+      }
+    }
+  } catch (handlerErr) {
+    // Log but still return 200 so Stripe doesn't retry endlessly
+    console.error('Webhook handler error:', handlerErr);
+  }
+
+  res.json({ received: true });
+});
 
 // Initialize Resend for email
 let resendClient = null;
@@ -637,8 +748,8 @@ app.post('/api/create-account-link', async (req, res) => {
 
     const accountLink = await stripeClient.accountLinks.create({
       account: accountId,
-      refresh_url: refreshUrl || 'https://dandee.app/contractor/onboarding/refresh',
-      return_url: returnUrl || 'https://dandee.app/contractor/onboarding/complete',
+      refresh_url: refreshUrl || `${APP_URL}/contractor/profile?onboarding=refresh`,
+      return_url: returnUrl || `${APP_URL}/contractor/profile?onboarding=complete`,
       type: 'account_onboarding',
     });
 
@@ -2084,8 +2195,7 @@ app.post('/api/payments/create', async (req, res) => {
     const timestamp = Date.now();
     const payment_number = `PAY-${timestamp}`;
 
-    // Calculate platform fee (2.9% + $0.30)
-    const platform_fee = (amount * 0.029) + 0.30;
+    const platform_fee = calculatePlatformFee(amount);
     const contractor_payout = amount - platform_fee;
 
     const paymentData = {
@@ -2259,6 +2369,170 @@ app.post('/api/invoices/update-status', async (req, res) => {
       error: 'Unexpected error updating invoice',
       details: error.message,
     });
+  }
+});
+
+// ============================================
+// PAYOUT ENDPOINTS
+// ============================================
+
+// Request a payout — creates a DB record then triggers a real Stripe payout
+// from the contractor's Connect account balance to their linked bank.
+app.post('/api/payouts/request', async (req, res) => {
+  try {
+    const { contractorId, amount, paymentMethod, bankDetails } = req.body;
+
+    if (!contractorId || !amount) {
+      return res.status(400).json({ error: 'contractorId and amount are required' });
+    }
+    if (amount < 100) {
+      return res.status(400).json({ error: 'Minimum payout amount is $100' });
+    }
+    if (!stripeClient) {
+      return res.status(503).json({ error: 'Stripe not initialized' });
+    }
+    if (!supabaseAdmin) {
+      return res.status(503).json({ error: 'Database not available' });
+    }
+
+    // 1. Look up the contractor's Stripe Connect account
+    const { data: profile, error: profileError } = await supabaseAdmin
+      .from('contractor_profiles')
+      .select('stripe_connect_account_id')
+      .eq('user_id', contractorId)
+      .single();
+
+    if (profileError || !profile?.stripe_connect_account_id) {
+      return res.status(400).json({
+        error: 'No Stripe Connect account found for this contractor. Please complete Stripe onboarding first.',
+      });
+    }
+
+    // 2. Create the DB record first (status: pending)
+    const timestamp = Date.now();
+    const payoutData = {
+      payment_number: `PAYOUT-${timestamp}`,
+      contractor_id: contractorId,
+      amount,
+      payment_method: paymentMethod || 'bank_transfer',
+      status: 'pending',
+      currency: 'usd',
+      platform_fee: 0,
+      contractor_payout: amount,
+      metadata: {
+        type: 'payout',
+        payoutMethod: paymentMethod || 'bank_transfer',
+        bankDetails: bankDetails || null,
+        requestedAt: new Date().toISOString(),
+      },
+    };
+
+    const { data, error } = await supabaseAdmin
+      .from('payments')
+      .insert(payoutData)
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Failed to create payout record:', error);
+      return res.status(500).json({ error: 'Failed to create payout', details: error.message });
+    }
+
+    // 3. Trigger the actual Stripe payout from the Connect account's balance
+    try {
+      const stripePayout = await stripeClient.payouts.create(
+        {
+          amount: Math.round(amount * 100), // Stripe expects cents
+          currency: 'usd',
+          metadata: {
+            dandee_payment_id: data.id,
+            contractor_id: contractorId,
+          },
+        },
+        { stripeAccount: profile.stripe_connect_account_id }
+      );
+
+      // 4. Update the DB record with the Stripe payout ID
+      await supabaseAdmin
+        .from('payments')
+        .update({
+          status: 'processing',
+          stripe_payout_id: stripePayout.id,
+        })
+        .eq('id', data.id);
+
+      console.log('Payout initiated:', stripePayout.id, 'for contractor:', contractorId);
+      res.json({
+        success: true,
+        payout: { ...data, status: 'processing', stripe_payout_id: stripePayout.id },
+      });
+    } catch (stripeError) {
+      // Stripe rejected the payout (e.g. insufficient balance)
+      await supabaseAdmin
+        .from('payments')
+        .update({ status: 'failed' })
+        .eq('id', data.id);
+
+      console.error('Stripe payout failed for', contractorId, ':', stripeError.message);
+      res.status(400).json({
+        error: 'Payout failed',
+        details: stripeError.message,
+        code: stripeError.code,
+      });
+    }
+  } catch (error) {
+    console.error('Error creating payout:', error);
+    res.status(500).json({ error: 'Failed to create payout request', details: error.message });
+  }
+});
+
+// Get payout history for a contractor
+app.get('/api/payouts/history/:contractorId', async (req, res) => {
+  try {
+    const { contractorId } = req.params;
+
+    const { data, error } = await supabaseAdmin
+      .from('payments')
+      .select('*')
+      .eq('contractor_id', contractorId)
+      .contains('metadata', { type: 'payout' })
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('❌ Failed to fetch payout history:', error);
+      return res.status(500).json({ error: 'Failed to fetch payout history', details: error.message });
+    }
+
+    res.json({ success: true, payouts: data || [] });
+  } catch (error) {
+    console.error('❌ Error fetching payout history:', error);
+    res.status(500).json({ error: 'Failed to fetch payout history', details: error.message });
+  }
+});
+
+// Cancel a payout
+app.post('/api/payouts/cancel/:payoutId', async (req, res) => {
+  try {
+    const { payoutId } = req.params;
+
+    const { data, error } = await supabaseAdmin
+      .from('payments')
+      .update({ status: 'cancelled' })
+      .eq('id', payoutId)
+      .contains('metadata', { type: 'payout' })
+      .eq('status', 'pending')
+      .select()
+      .single();
+
+    if (error) {
+      console.error('❌ Failed to cancel payout:', error);
+      return res.status(500).json({ error: 'Failed to cancel payout', details: error.message });
+    }
+
+    res.json({ success: true, payout: data });
+  } catch (error) {
+    console.error('❌ Error cancelling payout:', error);
+    res.status(500).json({ error: 'Failed to cancel payout', details: error.message });
   }
 });
 
