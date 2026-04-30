@@ -415,16 +415,16 @@ async function recomputeScore(supabase, userId, opts = {}) {
 
   const total = combineTotal(subScores);
 
-  // 4. Tips engine (Phase 5) determines the realistic ceiling.
-  //    For now, default potential = total so the API contract is stable.
+  // 4. Run the tips engine. potential_score = total + Σ(open tip impacts),
+  //    capped at 100. Drives the "could go up to X" copy on the dashboard.
   let potential = total;
-  if (typeof opts.tipsEngine === 'function') {
-    try {
-      const result = await opts.tipsEngine(userId, { subScores, total, inputs });
-      if (typeof result?.potential === 'number') potential = clamp(result.potential, 0, 100);
-    } catch (e) {
-      console.error('[dandeeScoreService] tipsEngine error (non-fatal):', e.message);
-    }
+  let tipsResult = null;
+  try {
+    const tipsEngine = require('./tipsEngine');
+    tipsResult = await tipsEngine.regenerate(supabase, userId);
+    potential = clamp(total + (tipsResult.sumImpacts || 0), 0, 100);
+  } catch (e) {
+    console.error('[dandeeScoreService] tipsEngine error (non-fatal):', e.message);
   }
 
   // 5. Persist + emit events.
