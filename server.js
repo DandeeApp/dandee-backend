@@ -1,11 +1,27 @@
+require('dotenv').config();
+
+// Sentry must be required + init'd before any other imports for auto-instrumentation.
+// Silent no-op if SENTRY_DSN is unset (e.g. local dev without an account).
+const Sentry = require('@sentry/node');
+if (process.env.SENTRY_DSN) {
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN,
+    environment: process.env.NODE_ENV || 'development',
+    tracesSampleRate: process.env.NODE_ENV === 'production' ? 0.1 : 1.0,
+  });
+  console.log('✅ Sentry initialized');
+} else {
+  console.warn('⚠️  SENTRY_DSN not set — backend errors will not be reported.');
+}
+
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 const stripe = require('stripe');
 const { createClient } = require('@supabase/supabase-js');
 const pushService = require('./pushNotificationService'); // Keep for backward compatibility
 const oneSignalService = require('./oneSignalPushService'); // NEW: OneSignal integration
 const { Resend } = require('resend');
-require('dotenv').config();
 
 // Log startup immediately
 console.log('🚀 Starting Dandee backend server...');
@@ -15,10 +31,12 @@ console.log(`🔧 Environment: ${process.env.NODE_ENV || 'development'}`);
 // Handle uncaught exceptions
 process.on('uncaughtException', (err) => {
   console.error('❌ Uncaught Exception:', err);
+  Sentry.captureException(err);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+  Sentry.captureException(reason);
 });
 
 // Graceful shutdown handlers
@@ -56,21 +74,40 @@ app.use((req, res, next) => {
 });
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
-// Initialize Stripe with your secret key
-const stripeSecretKey = process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder';
-
-// Warn if using default/placeholder key
-if (!process.env.STRIPE_SECRET_KEY || stripeSecretKey.includes('placeholder')) {
-  console.warn('⚠️  WARNING: Using placeholder Stripe API key!');
-  console.warn('⚠️  Stripe API calls will fail until you configure a valid key.');
-}
+// Initialize Stripe with the secret key. No placeholder fallback — silently
+// "running" with a fake key was masking a fatal misconfiguration in prod.
+const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
+const isProduction = process.env.NODE_ENV === 'production';
 
 let stripeClient = null;
-try {
-  stripeClient = stripe(stripeSecretKey);
-  console.log('✅ Stripe client initialized');
-} catch (err) {
-  console.error('❌ Failed to initialize Stripe:', err.message);
+
+if (!stripeSecretKey) {
+  const msg = '🚨 FATAL: STRIPE_SECRET_KEY env var is not set. Payments will not work.';
+  console.error(msg);
+  if (isProduction) {
+    console.error('🚨 Refusing to start backend in production without STRIPE_SECRET_KEY.');
+    process.exit(1);
+  } else {
+    console.error('⚠️  Continuing in dev mode without Stripe — any /api/* call that hits Stripe will fail.');
+  }
+} else if (stripeSecretKey.includes('placeholder') || stripeSecretKey === 'sk_test_placeholder') {
+  const msg = '🚨 FATAL: STRIPE_SECRET_KEY is set to a placeholder value, not a real key.';
+  console.error(msg);
+  if (isProduction) {
+    process.exit(1);
+  }
+} else {
+  try {
+    stripeClient = stripe(stripeSecretKey);
+    const keyMode = stripeSecretKey.startsWith('sk_live_') ? 'LIVE' : 'test';
+    console.log(`✅ Stripe client initialized (${keyMode} mode)`);
+    if (isProduction && keyMode !== 'LIVE') {
+      console.error('🚨 WARNING: NODE_ENV=production but Stripe is in TEST mode. No real money will move.');
+    }
+  } catch (err) {
+    console.error('❌ Failed to initialize Stripe:', err.message);
+    if (isProduction) process.exit(1);
+  }
 }
 
 // ============================================
@@ -98,12 +135,16 @@ app.post('/api/webhooks/stripe', async (req, res) => {
   const sig = req.headers['stripe-signature'];
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
+  // If we're misconfigured, return 200 so Stripe doesn't hammer us with
+  // exponential retries forever. The event is dropped — once config is
+  // fixed, replay missed events from the Stripe dashboard.
   if (!webhookSecret) {
-    console.error('STRIPE_WEBHOOK_SECRET not configured — webhook ignored');
-    return res.status(500).send('Webhook secret not configured');
+    console.error('🚨 STRIPE_WEBHOOK_SECRET not configured — webhook ACK\'d but event dropped. Set the env var and replay events from Stripe dashboard.');
+    return res.status(200).send('Webhook secret not configured (event dropped)');
   }
   if (!stripeClient) {
-    return res.status(503).send('Stripe not initialized');
+    console.error('🚨 stripeClient not initialized — webhook ACK\'d but event dropped. Check STRIPE_SECRET_KEY env var.');
+    return res.status(200).send('Stripe client not initialized (event dropped)');
   }
 
   let event;
@@ -142,6 +183,25 @@ app.post('/api/webhooks/stripe', async (req, res) => {
       case 'transfer.failed': {
         const transfer = event.data.object;
         console.error('TRANSFER FAILED:', transfer.id, 'destination:', transfer.destination);
+        if (supabaseAdmin) {
+          await supabaseAdmin
+            .from('stripe_transfers')
+            .update({ status: 'failed' })
+            .eq('transfer_id', transfer.id);
+        }
+        await notifyAdmin({
+          severity: 'critical',
+          alertType: 'stripe.transfer.failed',
+          message: `Stripe transfer ${transfer.id} failed to ${transfer.destination}. Contractor will not be paid until resolved.`,
+          metadata: {
+            transfer_id: transfer.id,
+            destination: transfer.destination,
+            amount: transfer.amount,
+            currency: transfer.currency,
+            failure_code: transfer.failure_code || null,
+            failure_message: transfer.failure_message || null,
+          },
+        });
         break;
       }
 
@@ -162,8 +222,60 @@ app.post('/api/webhooks/stripe', async (req, res) => {
         if (supabaseAdmin) {
           await supabaseAdmin
             .from('payments')
-            .update({ status: 'failed' })
+            .update({ status: 'failed', failure_reason: payout.failure_message || payout.failure_code || 'unknown' })
             .eq('stripe_payout_id', payout.id);
+        }
+        await notifyAdmin({
+          severity: 'critical',
+          alertType: 'stripe.payout.failed',
+          message: `Stripe payout ${payout.id} failed: ${payout.failure_message || payout.failure_code || 'unknown reason'}. Contractor did not receive funds.`,
+          metadata: {
+            payout_id: payout.id,
+            amount: payout.amount,
+            currency: payout.currency,
+            failure_code: payout.failure_code || null,
+            failure_message: payout.failure_message || null,
+            arrival_date: payout.arrival_date || null,
+          },
+        });
+        break;
+      }
+
+      // --- Connect account lifecycle ---
+      // Fires whenever Stripe re-evaluates a connected account: KYC clears,
+      // requirements come due, payouts get disabled, etc. We mirror the
+      // status onto contractor_profiles so the app can gate features in SQL
+      // without round-tripping to Stripe.
+      case 'account.updated': {
+        const account = event.data.object;
+        if (supabaseAdmin && account.id) {
+          const { error: updateErr } = await supabaseAdmin
+            .from('contractor_profiles')
+            .update({
+              stripe_charges_enabled: !!account.charges_enabled,
+              stripe_payouts_enabled: !!account.payouts_enabled,
+              stripe_details_submitted: !!account.details_submitted,
+              stripe_requirements: account.requirements
+                ? {
+                    currently_due: account.requirements.currently_due || [],
+                    past_due: account.requirements.past_due || [],
+                    eventually_due: account.requirements.eventually_due || [],
+                    disabled_reason: account.requirements.disabled_reason || null,
+                  }
+                : null,
+              stripe_account_updated_at: new Date().toISOString(),
+            })
+            .eq('stripe_connect_account_id', account.id);
+          if (updateErr) {
+            console.error('account.updated DB write failed for', account.id, updateErr);
+          } else {
+            console.log(
+              'account.updated synced:',
+              account.id,
+              'charges=', account.charges_enabled,
+              'payouts=', account.payouts_enabled
+            );
+          }
         }
         break;
       }
@@ -209,6 +321,40 @@ if (!supabaseUrl || !supabaseServiceRoleKey) {
     },
   });
   console.log('✅ Supabase admin client initialized for onboarding persistence');
+}
+
+// Dandee Score routes — owns /api/homes/*, /api/score/*, /api/tips/*
+// (mounted here so it picks up the supabaseAdmin client just created above).
+app.use(require('./routes/score')(supabaseAdmin));
+
+// Persists an operational alert to admin_alerts and (best-effort) emails
+// ADMIN_ALERT_EMAIL via Resend. Never throws — alert pipeline must not be
+// able to crash the caller (e.g. a webhook handler).
+async function notifyAdmin({ severity = 'error', alertType, message, metadata = {} }) {
+  try {
+    if (supabaseAdmin) {
+      const { error: insertErr } = await supabaseAdmin
+        .from('admin_alerts')
+        .insert({ severity, alert_type: alertType, message, metadata });
+      if (insertErr) console.error('admin_alerts insert failed:', insertErr.message);
+    }
+  } catch (err) {
+    console.error('notifyAdmin DB write threw:', err.message);
+  }
+
+  const adminEmail = process.env.ADMIN_ALERT_EMAIL;
+  if (resendClient && adminEmail) {
+    try {
+      await resendClient.emails.send({
+        from: 'Dandee <support@dandeeapp.com>',
+        to: adminEmail,
+        subject: `[Dandee ${severity.toUpperCase()}] ${alertType}`,
+        text: `${message}\n\n---\nMetadata:\n${JSON.stringify(metadata, null, 2)}`,
+      });
+    } catch (err) {
+      console.error('notifyAdmin email send failed:', err.message);
+    }
+  }
 }
 
 // Initialize Push Notification Service
@@ -578,16 +724,27 @@ app.post('/api/create-payment-intent', async (req, res) => {
 
     console.log('Creating payment intent:', { amount, currency, metadata });
 
-    const paymentIntent = await stripeClient.paymentIntents.create({
-      amount: Math.round(amount), // Ensure amount is in cents
-      currency,
-      metadata,
-      automatic_payment_methods: {
-        enabled: true,
-      },
-    });
+    // Stable key prevents double-charging on client retries. Caller can pass
+    // an explicit key in metadata; otherwise fall back to invoice/quote id.
+    const idempotencyKey =
+      metadata.idempotency_key ||
+      (metadata.invoice_id && `pi:invoice:${metadata.invoice_id}`) ||
+      (metadata.quote_id && `pi:quote:${metadata.quote_id}`) ||
+      `pi:${crypto.randomUUID()}`;
 
-    console.log('Payment intent created:', paymentIntent.id);
+    const paymentIntent = await stripeClient.paymentIntents.create(
+      {
+        amount: Math.round(amount), // Ensure amount is in cents
+        currency,
+        metadata,
+        automatic_payment_methods: {
+          enabled: true,
+        },
+      },
+      { idempotencyKey }
+    );
+
+    console.log('Payment intent created:', paymentIntent.id, 'key:', idempotencyKey);
 
     res.json({
       id: paymentIntent.id,
@@ -699,15 +856,24 @@ app.post('/api/create-connect-account', async (req, res) => {
 
     console.log('Creating Stripe Connect account for:', email);
 
-    const account = await stripeClient.accounts.create({
-      type: 'express',
-      email,
-      business_type: 'individual',
-      metadata: {
-        contractor_id: contractorId || '',
-        business_name: businessName || '',
+    // Keyed on contractorId so a retried request returns the same account
+    // instead of orphaning a duplicate Express account.
+    const idempotencyKey = contractorId
+      ? `connect_account:${contractorId}`
+      : `connect_account:${crypto.randomUUID()}`;
+
+    const account = await stripeClient.accounts.create(
+      {
+        type: 'express',
+        email,
+        business_type: 'individual',
+        metadata: {
+          contractor_id: contractorId || '',
+          business_name: businessName || '',
+        },
       },
-    });
+      { idempotencyKey }
+    );
 
     console.log('✅ Stripe Connect account created:', account.id);
 
@@ -801,12 +967,20 @@ app.post('/api/transfer-to-contractor', async (req, res) => {
 
     console.log('Transferring to contractor:', { accountId, amount, currency });
 
-    const transfer = await stripeClient.transfers.create({
-      amount: Math.round(amount),
-      currency,
-      destination: accountId,
-      metadata,
-    });
+    const idempotencyKey =
+      metadata.idempotency_key ||
+      (metadata.payment_id && `transfer:${metadata.payment_id}`) ||
+      `transfer:${crypto.randomUUID()}`;
+
+    const transfer = await stripeClient.transfers.create(
+      {
+        amount: Math.round(amount),
+        currency,
+        destination: accountId,
+        metadata,
+      },
+      { idempotencyKey }
+    );
 
     console.log('✅ Transfer completed:', transfer.id);
 
@@ -833,18 +1007,27 @@ app.post('/api/create-payment-intent-with-fee', async (req, res) => {
 
     console.log('Creating payment intent with fee:', { amount, application_fee_amount, contractor_account_id });
 
-    const paymentIntent = await stripeClient.paymentIntents.create({
-      amount: Math.round(amount),
-      currency,
-      application_fee_amount: Math.round(application_fee_amount),
-      transfer_data: {
-        destination: contractor_account_id,
+    const idempotencyKey =
+      metadata.idempotency_key ||
+      (metadata.invoice_id && `pi_fee:invoice:${metadata.invoice_id}`) ||
+      (metadata.quote_id && `pi_fee:quote:${metadata.quote_id}`) ||
+      `pi_fee:${crypto.randomUUID()}`;
+
+    const paymentIntent = await stripeClient.paymentIntents.create(
+      {
+        amount: Math.round(amount),
+        currency,
+        application_fee_amount: Math.round(application_fee_amount),
+        transfer_data: {
+          destination: contractor_account_id,
+        },
+        metadata,
+        automatic_payment_methods: {
+          enabled: true,
+        },
       },
-      metadata,
-      automatic_payment_methods: {
-        enabled: true,
-      },
-    });
+      { idempotencyKey }
+    );
 
     console.log('✅ Payment intent with fee created:', paymentIntent.id);
 
@@ -2449,7 +2632,10 @@ app.post('/api/payouts/request', async (req, res) => {
             contractor_id: contractorId,
           },
         },
-        { stripeAccount: profile.stripe_connect_account_id }
+        {
+          stripeAccount: profile.stripe_connect_account_id,
+          idempotencyKey: `payout:${data.id}`,
+        }
       );
 
       // 4. Update the DB record with the Stripe payout ID
@@ -3986,158 +4172,13 @@ app.post('/api/invitations/:invitationCode/accept', async (req, res) => {
   }
 });
 
-// Migrate existing CRM clients from crm_clients table to clients table
-app.post('/api/contractors/:contractorId/migrate-crm', async (req, res) => {
-  const { contractorId } = req.params;
-  console.log(`🔄 Migrating CRM data for contractor: ${contractorId}`);
-
-  if (!supabaseAdmin) {
-    return res.status(500).json({ error: 'Database not configured' });
-  }
-
-  try {
-    // Get all entries from crm_clients for this contractor
-    const { data: crmClients, error: fetchError } = await supabaseAdmin
-      .from('crm_clients')
-      .select('*')
-      .eq('contractor_id', contractorId);
-
-    if (fetchError) {
-      console.error('❌ Error fetching crm_clients:', fetchError);
-      return res.status(500).json({ error: fetchError.message });
-    }
-
-    console.log(`📊 Found ${crmClients?.length || 0} crm_clients entries`);
-
-    // Also check accepted invitations
-    const { data: acceptedInvitations, error: inviteError } = await supabaseAdmin
-      .from('contractor_client_invitations')
-      .select('*')
-      .eq('contractor_id', contractorId)
-      .eq('status', 'accepted');
-
-    if (inviteError) {
-      console.error('❌ Error fetching accepted invitations:', inviteError);
-    }
-
-    console.log(`📊 Found ${acceptedInvitations?.length || 0} accepted invitations`);
-
-    let migratedCount = 0;
-    let skippedCount = 0;
-
-    // Migrate from crm_clients
-    if (crmClients && crmClients.length > 0) {
-      for (const crmClient of crmClients) {
-        // Check if already exists in clients table
-        const { data: existingClient } = await supabaseAdmin
-          .from('clients')
-          .select('id')
-          .eq('contractor_id', crmClient.contractor_id)
-          .eq('email', crmClient.email)
-          .maybeSingle();
-
-        if (existingClient) {
-          console.log(`⏭️ Skipping ${crmClient.name} - already exists in clients table`);
-          skippedCount++;
-          continue;
-        }
-
-        // Insert into clients table
-        const { error: insertError } = await supabaseAdmin
-          .from('clients')
-          .insert({
-            contractor_id: crmClient.contractor_id,
-            customer_id: crmClient.customer_id,
-            name: crmClient.name,
-            email: crmClient.email,
-            phone: crmClient.phone,
-            address: crmClient.address,
-            city: crmClient.city,
-            state: crmClient.state,
-            zip_code: crmClient.zip_code,
-            source: crmClient.source || 'invitation',
-            status: crmClient.status || 'active',
-            notes: crmClient.notes,
-            total_jobs: 0,
-            total_spent: 0,
-            first_job_date: crmClient.created_at,
-            created_at: crmClient.created_at,
-            updated_at: crmClient.updated_at || new Date().toISOString(),
-          });
-
-        if (insertError) {
-          console.error(`❌ Error migrating ${crmClient.name}:`, insertError);
-        } else {
-          console.log(`✅ Migrated ${crmClient.name} to clients table`);
-          migratedCount++;
-        }
-      }
-    }
-
-    // Migrate from accepted invitations
-    if (acceptedInvitations && acceptedInvitations.length > 0) {
-      for (const invitation of acceptedInvitations) {
-        if (!invitation.client_user_id) {
-          console.log(`⏭️ Skipping invitation ${invitation.client_name} - no client_user_id`);
-          skippedCount++;
-          continue;
-        }
-
-        // Check if already exists in clients table
-        const { data: existingClient } = await supabaseAdmin
-          .from('clients')
-          .select('id')
-          .eq('contractor_id', invitation.contractor_id)
-          .eq('customer_id', invitation.client_user_id)
-          .maybeSingle();
-
-        if (existingClient) {
-          console.log(`⏭️ Skipping ${invitation.client_name} - already exists in clients table`);
-          skippedCount++;
-          continue;
-        }
-
-        // Insert into clients table
-        const { error: insertError } = await supabaseAdmin
-          .from('clients')
-          .insert({
-            contractor_id: invitation.contractor_id,
-            customer_id: invitation.client_user_id,
-            name: invitation.client_name,
-            email: invitation.client_email,
-            phone: invitation.client_phone,
-            source: 'invitation',
-            status: 'active',
-            notes: invitation.notes || 'Migrated from accepted invitation',
-            total_jobs: 0,
-            total_spent: 0,
-            first_job_date: invitation.accepted_at,
-            created_at: invitation.invited_at,
-            updated_at: invitation.accepted_at,
-          });
-
-        if (insertError) {
-          console.error(`❌ Error migrating invitation for ${invitation.client_name}:`, insertError);
-        } else {
-          console.log(`✅ Migrated ${invitation.client_name} from accepted invitation`);
-          migratedCount++;
-        }
-      }
-    }
-
-    console.log(`✅ Migration complete: ${migratedCount} migrated, ${skippedCount} skipped`);
-    res.json({ 
-      migrated: migratedCount, 
-      skipped: skippedCount,
-      total: (crmClients?.length || 0) + (acceptedInvitations?.length || 0),
-      crmClientsFound: crmClients?.length || 0,
-      acceptedInvitationsFound: acceptedInvitations?.length || 0,
-      message: `Successfully migrated ${migratedCount} clients`
-    });
-  } catch (error) {
-    console.error('❌ Exception in migration endpoint:', error);
-    res.status(500).json({ error: error.message });
-  }
+// Removed 2026-04-29: superseded by SQL migration 015. Returns 410 Gone
+// to make any stale clients fail loudly rather than silently misbehave.
+app.post('/api/contractors/:contractorId/migrate-crm', (req, res) => {
+  res.status(410).json({
+    error: 'Endpoint removed. Run supabase/migrations/015_consolidate_clients_tables.sql instead.',
+    superseded_by: 'migration_015',
+  });
 });
 
 // Diagnostic endpoint: Check invitation status
@@ -4154,11 +4195,8 @@ app.get('/api/debug/invitations/:contractorId', async (req, res) => {
       .select('*')
       .eq('contractor_id', contractorId);
 
-    const { data: crmClients } = await supabaseAdmin
-      .from('crm_clients')
-      .select('*')
-      .eq('contractor_id', contractorId);
-
+    // crm_clients was consolidated into `clients` by migration 015 (renamed
+    // to crm_clients_legacy_2026_04_29). Diagnostic now reads only `clients`.
     const { data: clients } = await supabaseAdmin
       .from('clients')
       .select('*')
@@ -4172,10 +4210,6 @@ app.get('/api/debug/invitations/:contractorId', async (req, res) => {
         cancelled: invitations?.filter(i => i.status === 'cancelled').length || 0,
         expired: invitations?.filter(i => i.status === 'expired').length || 0,
         list: invitations || []
-      },
-      crmClients: {
-        total: crmClients?.length || 0,
-        list: crmClients || []
       },
       clients: {
         total: clients?.length || 0,
@@ -4799,6 +4833,155 @@ setTimeout(() => {
   runDailyReEngagement();
   setInterval(runDailyReEngagement, RE_ENGAGEMENT_INTERVAL_MS);
 }, 60 * 1000);
+
+// ============================================
+// CRON: Stripe payout reconciliation
+// ============================================
+// Scheduler-agnostic. Configure any scheduler to POST to this URL daily
+// with `Authorization: Bearer ${CRON_SECRET}`. Examples:
+//   curl -X POST https://strong-insight-production.up.railway.app/api/cron/reconcile-payouts \
+//        -H "Authorization: Bearer $CRON_SECRET"
+// On Railway: add a cron service that runs `curl ...` on a schedule, or
+// use GitHub Actions / EasyCron / Mac launchd.
+//
+// Returns a JSON summary; raises an admin_alerts row whenever drift is
+// found. Safe to run repeatedly — idempotent on already-reconciled rows.
+
+function timingSafeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+}
+
+app.post('/api/cron/reconcile-payouts', async (req, res) => {
+  const cronSecret = process.env.CRON_SECRET;
+  if (!cronSecret) {
+    console.error('🚨 CRON_SECRET not configured — refusing to run reconciliation');
+    return res.status(503).json({ error: 'CRON_SECRET not configured' });
+  }
+  const auth = req.headers.authorization || '';
+  const provided = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+  if (!timingSafeEqual(provided, cronSecret)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  if (!supabaseAdmin || !stripeClient) {
+    return res.status(503).json({ error: 'Backend not fully initialized' });
+  }
+
+  const startedAt = new Date();
+  const summary = {
+    started_at: startedAt.toISOString(),
+    stuck_processing_checked: 0,
+    stuck_processing_repaired: 0,
+    stuck_processing_failed: 0,
+    pending_aged: 0,
+    errors: [],
+  };
+
+  try {
+    // --- Pass 1: rows stuck in 'processing' >24h with a stripe_payout_id.
+    // Most likely cause: a payout.paid webhook was missed (e.g., before
+    // task #1's stripe_payout_id column existed). Refetch from Stripe
+    // and apply the current truth.
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { data: stuck, error: stuckErr } = await supabaseAdmin
+      .from('payments')
+      .select('id, stripe_payout_id, contractor_id, amount, updated_at')
+      .eq('status', 'processing')
+      .not('stripe_payout_id', 'is', null)
+      .lt('updated_at', cutoff)
+      .limit(100);
+
+    if (stuckErr) throw new Error(`stuck query failed: ${stuckErr.message}`);
+
+    for (const row of stuck || []) {
+      summary.stuck_processing_checked++;
+      try {
+        // We don't know which connected account this payout belongs to without
+        // a column for it; the contractor_id is the link. Fetch the contractor's
+        // Stripe account, then retrieve the payout from that connected account.
+        const { data: profile } = await supabaseAdmin
+          .from('contractor_profiles')
+          .select('stripe_connect_account_id')
+          .eq('user_id', row.contractor_id)
+          .single();
+
+        if (!profile?.stripe_connect_account_id) {
+          summary.errors.push({ payment_id: row.id, error: 'no connect account on contractor' });
+          continue;
+        }
+
+        const payout = await stripeClient.payouts.retrieve(row.stripe_payout_id, {
+          stripeAccount: profile.stripe_connect_account_id,
+        });
+
+        if (payout.status === 'paid') {
+          await supabaseAdmin
+            .from('payments')
+            .update({ status: 'completed', payment_date: new Date().toISOString() })
+            .eq('id', row.id);
+          summary.stuck_processing_repaired++;
+        } else if (payout.status === 'failed' || payout.status === 'canceled') {
+          await supabaseAdmin
+            .from('payments')
+            .update({
+              status: 'failed',
+              failure_reason: payout.failure_message || payout.failure_code || payout.status,
+            })
+            .eq('id', row.id);
+          summary.stuck_processing_failed++;
+          await notifyAdmin({
+            severity: 'error',
+            alertType: 'reconcile.payout_failed_late',
+            message: `Reconcile found Stripe payout ${payout.id} in '${payout.status}' state — DB was stale.`,
+            metadata: { payment_id: row.id, payout_id: payout.id, status: payout.status },
+          });
+        }
+        // 'in_transit' / 'pending' — leave alone, will retry next run.
+      } catch (rowErr) {
+        summary.errors.push({ payment_id: row.id, error: rowErr.message });
+      }
+    }
+
+    // --- Pass 2: rows stuck in 'pending' >48h with no stripe_payout_id.
+    // These never made it to a Stripe payout call — probably a backend
+    // crash between insert and stripeClient.payouts.create. Alert; admin
+    // can manually retry from /api/payouts/create.
+    const pendingCutoff = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    const { data: pending, error: pendingErr } = await supabaseAdmin
+      .from('payments')
+      .select('id, contractor_id, amount, created_at')
+      .eq('status', 'pending')
+      .is('stripe_payout_id', null)
+      .lt('created_at', pendingCutoff)
+      .limit(50);
+
+    if (pendingErr) throw new Error(`pending query failed: ${pendingErr.message}`);
+
+    if ((pending || []).length > 0) {
+      summary.pending_aged = pending.length;
+      await notifyAdmin({
+        severity: 'warning',
+        alertType: 'reconcile.pending_aged',
+        message: `${pending.length} payment row(s) have been 'pending' for >48h with no Stripe payout. Likely orphaned by a backend crash mid-create.`,
+        metadata: { sample: pending.slice(0, 10).map(r => ({ id: r.id, contractor_id: r.contractor_id, amount: r.amount })) },
+      });
+    }
+
+    summary.finished_at = new Date().toISOString();
+    summary.duration_ms = Date.now() - startedAt.getTime();
+    console.log('✅ Reconciliation finished:', summary);
+    return res.json(summary);
+  } catch (err) {
+    console.error('❌ Reconciliation failed:', err);
+    summary.fatal_error = err.message;
+    return res.status(500).json(summary);
+  }
+});
+
+// Sentry Express error handler — must be registered AFTER all routes,
+// BEFORE the 404 + any other error middleware. Captures uncaught
+// errors thrown inside route handlers.
+Sentry.setupExpressErrorHandler(app);
 
 // 404 handler
 app.use('*', (req, res) => {
