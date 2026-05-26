@@ -287,6 +287,61 @@ module.exports = function buildScoreRouter(supabaseAdmin) {
     res.json({ rows: data });
   }));
 
+  // ---------- Paint colors ----------
+
+  router.post('/api/homes/:id/paint-colors', nestedHandler(async (req, res, _userId, homeId) => {
+    const { room, color_name, brand, code } = req.body || {};
+    if (!room) return res.status(400).json({ error: 'room required' });
+    const { data, error } = await supabaseAdmin
+      .from('paint_colors')
+      .insert({ home_id: homeId, room, color_name: color_name || null, brand: brand || null, code: code || null })
+      .select()
+      .single();
+    if (error) throw error;
+    res.json({ paint: data });
+  }));
+
+  router.delete('/api/homes/:id/paint-colors/:paintId', nestedHandler(async (req, res, _userId, homeId) => {
+    const { error } = await supabaseAdmin
+      .from('paint_colors')
+      .delete()
+      .eq('id', req.params.paintId)
+      .eq('home_id', homeId);
+    if (error) throw error;
+    res.json({ ok: true });
+  }));
+
+  // ---------- Appliance filters ----------
+
+  router.post('/api/homes/:id/filters', nestedHandler(async (req, res, _userId, homeId) => {
+    const { filter_type, filter_part_number, last_changed } = req.body || {};
+    if (!filter_type || !filter_part_number) {
+      return res.status(400).json({ error: 'filter_type and filter_part_number required' });
+    }
+    const { data, error } = await supabaseAdmin
+      .from('appliance_filters')
+      .insert({
+        home_id: homeId,
+        filter_type,
+        filter_part_number,
+        last_changed: last_changed || null,
+      })
+      .select()
+      .single();
+    if (error) throw error;
+    res.json({ filter: data });
+  }));
+
+  router.delete('/api/homes/:id/filters/:filterId', nestedHandler(async (req, res, _userId, homeId) => {
+    const { error } = await supabaseAdmin
+      .from('appliance_filters')
+      .delete()
+      .eq('id', req.params.filterId)
+      .eq('home_id', homeId);
+    if (error) throw error;
+    res.json({ ok: true });
+  }));
+
   // ---------- Preferences ----------
 
   router.post('/api/homes/:id/preferences', nestedHandler(async (req, res, userId, homeId) => {
