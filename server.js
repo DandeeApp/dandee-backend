@@ -327,6 +327,11 @@ if (!supabaseUrl || !supabaseServiceRoleKey) {
 // (mounted here so it picks up the supabaseAdmin client just created above).
 app.use(require('./routes/score')(supabaseAdmin));
 
+// RevenueCat webhook — mirrors IAP subscription lifecycle into
+// public.user_subscriptions so backend gating stays in sync with the
+// App Store / Play Store source of truth.
+app.use(require('./routes/revenuecatWebhook')(supabaseAdmin, notifyAdmin));
+
 // Persists an operational alert to admin_alerts and (best-effort) emails
 // ADMIN_ALERT_EMAIL via Resend. Never throws — alert pipeline must not be
 // able to crash the caller (e.g. a webhook handler).
