@@ -111,6 +111,47 @@ module.exports = function buildScoreRouter(supabaseAdmin) {
     res.json({ home });
   }));
 
+  // Returns the user's most recent home AND every related table in one
+  // shot via service role — so the profile UI doesn't have to fan out 8
+  // RLS-gated client queries.
+  router.get('/api/homes/me/full', wrap(async (_req, res, userId) => {
+    const { data: homes } = await supabaseAdmin
+      .from('homes')
+      .select('*')
+      .eq('owner_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(1);
+    const home = homes?.[0] || null;
+    if (!home) {
+      return res.json({
+        home: null, systems: [], appliances: [], maintenance: [], issues: [],
+        preferences: null, paints: [], filters: [], warranties: [],
+      });
+    }
+    const homeId = home.id;
+    const [sys, app, maint, iss, prefs, paint, filt, warr] = await Promise.all([
+      supabaseAdmin.from('home_systems').select('*').eq('home_id', homeId),
+      supabaseAdmin.from('home_appliances').select('*').eq('home_id', homeId),
+      supabaseAdmin.from('maintenance_log').select('id, task_type, performed_at, source').eq('home_id', homeId).order('performed_at', { ascending: false }).limit(20),
+      supabaseAdmin.from('home_issues').select('id, category, severity, opened_at, description').eq('home_id', homeId).is('resolved_at', null).order('opened_at', { ascending: false }),
+      supabaseAdmin.from('home_preferences').select('*').eq('home_id', homeId).maybeSingle(),
+      supabaseAdmin.from('paint_colors').select('*').eq('home_id', homeId),
+      supabaseAdmin.from('appliance_filters').select('*').eq('home_id', homeId),
+      supabaseAdmin.from('warranties').select('id, item_type, expires_at').eq('home_id', homeId).order('expires_at', { ascending: true }),
+    ]);
+    res.json({
+      home,
+      systems: sys.data || [],
+      appliances: app.data || [],
+      maintenance: maint.data || [],
+      issues: iss.data || [],
+      preferences: prefs.data || null,
+      paints: paint.data || [],
+      filters: filt.data || [],
+      warranties: warr.data || [],
+    });
+  }));
+
   router.get('/api/homes/me', wrap(async (_req, res, userId) => {
     const { data, error } = await supabaseAdmin
       .from('homes')
