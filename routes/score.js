@@ -287,6 +287,47 @@ module.exports = function buildScoreRouter(supabaseAdmin) {
     res.json({ rows: data });
   }));
 
+  // ---------- Warranties ----------
+
+  router.get('/api/homes/:id/warranties', nestedHandler(async (_req, res, _userId, homeId) => {
+    const { data, error } = await supabaseAdmin
+      .from('warranties')
+      .select('*')
+      .eq('home_id', homeId)
+      .order('expires_at', { ascending: true });
+    if (error) throw error;
+    res.json({ rows: data || [] });
+  }));
+
+  router.post('/api/homes/:id/warranties', nestedHandler(async (req, res, _userId, homeId) => {
+    const { item_type, brand, model, expires_at, file_url } = req.body || {};
+    if (!item_type) return res.status(400).json({ error: 'item_type required' });
+    const { data, error } = await supabaseAdmin
+      .from('warranties')
+      .insert({
+        home_id: homeId,
+        item_type,
+        brand: brand || null,
+        model: model || null,
+        expires_at: expires_at || null,
+        file_url: file_url || null,
+      })
+      .select()
+      .single();
+    if (error) throw error;
+    res.json({ warranty: data });
+  }));
+
+  router.delete('/api/homes/:id/warranties/:warrantyId', nestedHandler(async (req, res, _userId, homeId) => {
+    const { error } = await supabaseAdmin
+      .from('warranties')
+      .delete()
+      .eq('id', req.params.warrantyId)
+      .eq('home_id', homeId);
+    if (error) throw error;
+    res.json({ ok: true });
+  }));
+
   // ---------- Paint colors ----------
 
   router.post('/api/homes/:id/paint-colors', nestedHandler(async (req, res, _userId, homeId) => {
