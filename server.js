@@ -548,14 +548,58 @@ const sanitizeScheduledJobPayload = (payload = {}) => {
   return sanitized;
 };
 
-// Health check endpoint
+// Health check endpoint — fast static liveness check, no dependencies
 app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
+  res.json({
+    status: 'OK',
     message: 'Stripe API server is running',
     version: 'v2.2-invitations-endpoint-added',
     timestamp: new Date().toISOString()
   });
+});
+
+// Deep health check — verifies Supabase connectivity. Railway's healthcheckPath
+// points here so a container whose supabaseAdmin queries fail (e.g. "fetch
+// failed" on a dead connection) reports 503 and gets recycled by ON_FAILURE.
+const HEALTH_DB_TIMEOUT_MS = 4000;
+
+app.get('/api/health/deep', async (req, res) => {
+  const base = {
+    message: 'Stripe API server is running',
+    version: 'v2.2-invitations-endpoint-added',
+    timestamp: new Date().toISOString()
+  };
+
+  if (!supabaseAdmin) {
+    return res.status(503).json({ ...base, status: 'ERROR', reason: 'Supabase admin client not configured' });
+  }
+
+  let timer;
+  try {
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`Supabase check timed out after ${HEALTH_DB_TIMEOUT_MS}ms`)),
+        HEALTH_DB_TIMEOUT_MS
+      );
+    });
+
+    const { error } = await Promise.race([
+      supabaseAdmin.from('clients').select('id').limit(1),
+      timeout
+    ]);
+
+    if (error) {
+      console.error('❌ Deep health check: Supabase query failed:', error.message);
+      return res.status(503).json({ ...base, status: 'ERROR', reason: `Supabase query failed: ${error.message}` });
+    }
+
+    res.json({ ...base, status: 'OK', supabase: 'OK' });
+  } catch (err) {
+    console.error('❌ Deep health check failed:', err.message);
+    res.status(503).json({ ...base, status: 'ERROR', reason: err.message || 'Supabase check failed' });
+  } finally {
+    clearTimeout(timer);
+  }
 });
 
 // Create review (bypasses RLS using admin client)
@@ -5019,7 +5063,7 @@ app.use('*', (req, res) => {
 // Start server
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Dandee API server running on port ${PORT}`);
-  console.log(`📊 Health check: /api/health`);
+  console.log(`📊 Health check: /api/health (liveness), /api/health/deep (Supabase)`);
   console.log(`✅ Server ready to accept connections`);
 });
 
