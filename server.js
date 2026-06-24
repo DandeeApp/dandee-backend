@@ -917,10 +917,32 @@ app.post('/api/create-account-link', async (req, res) => {
 
     console.log('Creating account link for:', accountId);
 
+    // Stripe livemode rejects localhost / non-https redirect URLs. Clients build
+    // these from window.location.origin, which can be localhost (local dev or
+    // Capacitor webview), so never trust them blindly — fall back to APP_URL.
+    const isValidLiveUrl = (u) =>
+      typeof u === 'string' &&
+      /^https:\/\//.test(u) &&
+      !/localhost|127\.0\.0\.1|0\.0\.0\.0/.test(u);
+
+    const safeReturnUrl = isValidLiveUrl(returnUrl)
+      ? returnUrl
+      : `${APP_URL}/contractor/profile?onboarding=complete`;
+    const safeRefreshUrl = isValidLiveUrl(refreshUrl)
+      ? refreshUrl
+      : `${APP_URL}/contractor/profile?onboarding=refresh`;
+
+    if (returnUrl && !isValidLiveUrl(returnUrl)) {
+      console.warn(`Rejected invalid return_url "${returnUrl}", using ${safeReturnUrl}`);
+    }
+    if (refreshUrl && !isValidLiveUrl(refreshUrl)) {
+      console.warn(`Rejected invalid refresh_url "${refreshUrl}", using ${safeRefreshUrl}`);
+    }
+
     const accountLink = await stripeClient.accountLinks.create({
       account: accountId,
-      refresh_url: refreshUrl || `${APP_URL}/contractor/profile?onboarding=refresh`,
-      return_url: returnUrl || `${APP_URL}/contractor/profile?onboarding=complete`,
+      refresh_url: safeRefreshUrl,
+      return_url: safeReturnUrl,
       type: 'account_onboarding',
     });
 
